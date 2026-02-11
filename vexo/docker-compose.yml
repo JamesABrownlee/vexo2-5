@@ -1,0 +1,61 @@
+services:
+  musicbot:
+    image: ghcr.io/jamesabrownlee/vexo-bot:latest
+    container_name: smart-music-bot
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8080
+      - DATABASE_PATH=/app/data/musicbot.db
+      - RADIO_PRESENTER_API_URL=${RADIO_PRESENTER_API_URL:-http://radio-presenter:5090/api/radio-presenter}
+      - RADIO_PRESENTER_VOICE=${RADIO_PRESENTER_VOICE}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "6767:8080" # Map container 8080 to host 6767
+    healthcheck:
+      test: [ "CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status').read()" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - vexo-network
+
+  dashboard:
+    image: ghcr.io/jamesabrownlee/vexo-dashboard:latest
+    container_name: vexo-dashboard
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - DATABASE_PATH=/app/data/musicbot.db
+      - BOT_API_URL=http://musicbot:8080 # Internal docker network address
+    volumes:
+      - ./data:/app/data:ro # Mount database read-only
+    ports:
+      - "3000:3000"
+    depends_on:
+      - musicbot
+    healthcheck:
+      test: [ "CMD", "node", "-e", "require('http').get('http://localhost:3000/api/status', (res) => res.statusCode === 200 ? process.exit(0) : process.exit(1))" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - vexo-network
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKER_API_VERSION=1.45
+    command: --interval 60 --cleanup
+
+networks:
+  vexo-network:
+    driver: bridge
