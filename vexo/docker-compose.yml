@@ -1,6 +1,6 @@
 services:
   musicbot:
-    image: ghcr.io/jamesabrownlee/vexo-bot:latest
+    image: ghcr.io/jamesabrownlee/vexo2-5:latest
     container_name: smart-music-bot
     restart: unless-stopped
     pull_policy: always
@@ -28,7 +28,7 @@ services:
       - vexo-network
 
   dashboard:
-    image: ghcr.io/jamesabrownlee/vexo-dashboard:latest
+    image: ghcr.io/jamesabrownlee/vexo2-5:latest
     container_name: vexo-dashboard
     restart: unless-stopped
     environment:

@@ -64,38 +64,37 @@ class WebSocketLogHandler(logging.Handler):
         return result
     
     def emit(self, record):
-        if self.ws_manager.clients:
-            try:
-                message = record.getMessage()
-                parsed = self._parse_structured(message)
-                
-                log_entry = {
-                    "timestamp": record.created,
-                    "level": record.levelname,
-                    "message": message,
-                    "logger": record.name,
-                    "guild_id": getattr(record, "guild_id", None),
-                    "category": parsed["category"],
-                    "event": parsed["event"],
-                    "fields": parsed["fields"],
-                }
-                
-                # Check if we're in the same loop
-                try:
-                    current_loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    current_loop = None
+        try:
+            message = record.getMessage()
+            parsed = self._parse_structured(message)
 
-                if current_loop == self.loop:
-                    asyncio.create_task(self.ws_manager.broadcast(log_entry))
-                else:
-                    asyncio.run_coroutine_threadsafe(
-                        self.ws_manager.broadcast(log_entry), 
-                        self.loop
-                    )
-            except Exception:
-                # Prevent recursive logging loops if logging fails
-                pass
+            log_entry = {
+                "timestamp": record.created,
+                "level": record.levelname,
+                "message": message,
+                "logger": record.name,
+                "guild_id": getattr(record, "guild_id", None),
+                "category": parsed["category"],
+                "event": parsed["event"],
+                "fields": parsed["fields"],
+            }
+
+            # Check if we're in the same loop
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+
+            if current_loop == self.loop:
+                asyncio.create_task(self.ws_manager.broadcast(log_entry))
+            else:
+                asyncio.run_coroutine_threadsafe(
+                    self.ws_manager.broadcast(log_entry),
+                    self.loop
+                )
+        except Exception:
+            # Prevent recursive logging loops if logging fails
+            pass
 
 
 class WebSocketManager:

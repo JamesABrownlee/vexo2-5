@@ -107,6 +107,8 @@ class GuildPlayer:
     _np_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _current_source: discord.AudioSource | None = None
     _current_stream_info: StreamInfo | None = None
+    _play_task: asyncio.Task | None = None
+    _play_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class MusicCog(commands.Cog):
@@ -286,6 +288,16 @@ class MusicCog(commands.Cog):
         if guild_id not in self.players:
             self.players[guild_id] = GuildPlayer(guild_id=guild_id)
         return self.players[guild_id]
+
+    async def ensure_play_loop(self, player: GuildPlayer, *, reason: str) -> bool:
+        """Start playback loop once per guild; no-op if one is already active."""
+        async with player._play_start_lock:
+            task = player._play_task
+            if task and not task.done():
+                return False
+            player._play_task = asyncio.create_task(self._play_loop(player))
+            log.info_cat(Category.PLAYBACK, "playback_loop_started", guild_id=player.guild_id, reason=reason)
+            return True
 
     @staticmethod
     def _as_bool(value, default: bool = True) -> bool:
@@ -868,6 +880,11 @@ class MusicCog(commands.Cog):
 
                 # 5. Play the audio
                 try:
+                    if player.voice_client.is_playing() or player.voice_client.is_paused():
+                        # Clear any stale source before starting the next track.
+                        player.voice_client.stop()
+                        await asyncio.sleep(0.15)
+
                     bitrate = 128
                     if player.voice_client.channel:
                         bitrate = min(512, player.voice_client.channel.bitrate // 1000)
@@ -927,6 +944,8 @@ class MusicCog(commands.Cog):
             player.current = None
             player._current_source = None
             player._current_stream_info = None
+            if player._play_task is asyncio.current_task():
+                player._play_task = None
             await self._ensure_obs_relay_state()
             if player._maintenance_task:
                 player._maintenance_task.cancel()
@@ -1284,8 +1303,7 @@ class MusicCog(commands.Cog):
 
                 # Auto-heal playback loop if queue exists and we are connected but loop isn't running.
                 if (not player.is_playing) and (player.current or not player.queue.empty()):
-                    asyncio.create_task(self._play_loop(player))
-                    log.info_cat(Category.PLAYBACK, "playback_loop_restarted", guild_id=guild_id, reason="watchdog_reconcile")
+                    await self.ensure_play_loop(player, reason="watchdog_reconcile")
                 continue
 
             # No connected guild VC -> normalize stale state.
@@ -1307,13 +1325,45 @@ class MusicCog(commands.Cog):
 
         guild = self.bot.get_guild(guild_id)
         guild_vc = guild.voice_client if guild else None
-        if guild_vc and guild_vc.is_connected():
+        if guild_vc:
+            # During voice WS recovery discord.py may expose a guild VC object
+            # before it reports as connected. Treat this as reconnect-in-flight.
             player.voice_client = guild_vc
+            if guild_vc.is_connected():
+                if player.current or not player.queue.empty():
+                    try:
+                        await self.ensure_play_loop(player, reason="voice_reconnect_confirm")
+                    except Exception:
+                        pass
             return
 
         player.voice_client = None
         player.is_playing = False
         log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild=guild_name, reason="bot_disconnected")
+
+    async def _resume_playback_after_reconnect(self, guild_id: int, *, delay_s: float = 2.5) -> None:
+        """Best-effort delayed resume after voice reconnect completes."""
+        await asyncio.sleep(delay_s)
+        player = self.players.get(guild_id)
+        if not player:
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        guild_vc = guild.voice_client if guild else None
+        if not guild_vc or not guild_vc.is_connected():
+            return
+
+        player.voice_client = guild_vc
+        if player.current or not player.queue.empty():
+            try:
+                await self.ensure_play_loop(player, reason="voice_reconnect_delayed")
+            except Exception as e:
+                log.debug_cat(
+                    Category.PLAYBACK,
+                    "playback_loop_delayed_resume_failed",
+                    guild_id=guild_id,
+                    error=str(e),
+                )
     
     # ==================== EVENTS ====================
     
@@ -1331,6 +1381,20 @@ class MusicCog(commands.Cog):
                 player = self.players.get(member.guild.id)
                 if player and member.guild.voice_client:
                     player.voice_client = member.guild.voice_client
+                    # Voice WS can reconnect without a fresh /play command.
+                    # If there is pending work, ensure playback loop is running again.
+                    if player.current or not player.queue.empty():
+                        try:
+                            await self.ensure_play_loop(player, reason="voice_reconnect")
+                        except Exception as e:
+                            log.debug_cat(
+                                Category.PLAYBACK,
+                                "playback_loop_resume_failed",
+                                guild_id=member.guild.id,
+                                error=str(e),
+                            )
+                    # Also schedule a delayed check to handle out-of-order reconnect events.
+                    asyncio.create_task(self._resume_playback_after_reconnect(member.guild.id))
             elif before.channel and not after.channel:
                 asyncio.create_task(self._confirm_voice_disconnect(member.guild.id, member.guild.name))
             return

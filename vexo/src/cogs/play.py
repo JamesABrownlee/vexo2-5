@@ -84,9 +84,7 @@ class PlayCog(commands.Cog):
                     
                     # After reconnection, restart playback if there are queued items
                     if not player.is_playing and not player.queue.empty():
-                        player.is_playing = True
-                        asyncio.create_task(music._play_loop(player))
-                        log.event(Category.PLAYBACK, Event.PLAYBACK_STARTED, guild_id=interaction.guild_id, reason="reconnection")
+                        await music.ensure_play_loop(player, reason="reconnection")
                 except Exception as e:
                     try:
                         await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
@@ -209,7 +207,7 @@ class PlayCog(commands.Cog):
             player.last_activity = datetime.now(UTC)
 
             if not player.is_playing:
-                asyncio.create_task(music._play_loop(player))
+                await music.ensure_play_loop(player, reason="play_song")
 
             embed = discord.Embed(
                 title="🎵 Added to Queue",
@@ -269,9 +267,7 @@ class PlayCog(commands.Cog):
                     
                     # After reconnection, restart playback if there are queued items
                     if not player.is_playing and not player.queue.empty():
-                        player.is_playing = True
-                        asyncio.create_task(music._play_loop(player))
-                        log.event(Category.PLAYBACK, Event.PLAYBACK_STARTED, guild_id=interaction.guild_id, reason="reconnection")
+                        await music.ensure_play_loop(player, reason="reconnection")
                 except Exception as e:
                     await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
                     return
@@ -339,7 +335,7 @@ class PlayCog(commands.Cog):
             player.last_activity = datetime.now(UTC)
 
             if not player.is_playing:
-                asyncio.create_task(music._play_loop(player))
+                await music.ensure_play_loop(player, reason="play_artist")
 
             embed = discord.Embed(
                 title="👩‍🎤 Artist Radio Queued",
@@ -394,9 +390,7 @@ class PlayCog(commands.Cog):
                     
                     # After reconnection, restart playback if there are queued items
                     if not player.is_playing and not player.queue.empty():
-                        player.is_playing = True
-                        asyncio.create_task(music._play_loop(player))
-                        log.event(Category.PLAYBACK, Event.PLAYBACK_STARTED, guild_id=interaction.guild_id, reason="reconnection")
+                        await music.ensure_play_loop(player, reason="reconnection")
                 except Exception as e:
                     await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
                     return
@@ -405,7 +399,7 @@ class PlayCog(commands.Cog):
             player.last_activity = datetime.now(UTC)
 
             if not player.is_playing:
-                asyncio.create_task(music._play_loop(player))
+                await music.ensure_play_loop(player, reason="play_any")
 
             await interaction.followup.send("🎲 **Discovery mode activated!** Finding songs for you...", ephemeral=True)
 

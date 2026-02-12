@@ -95,6 +95,13 @@ class DiscoveryEngine:
         self.playback = playback_crud
         self.reactions = reaction_crud
         self.turn_tracker = TurnTracker()
+
+    @staticmethod
+    def _song_key(title: str | None, artist: str | None) -> str:
+        """Build a normalized key to suppress same-song repeats across different video IDs."""
+        t = (title or "").strip().lower()
+        a = (artist or "").strip().lower()
+        return f"{a}|{t}"
     
     async def get_next_song(
         self,
@@ -135,17 +142,25 @@ class DiscoveryEngine:
         
         # Also limit by count just in case time window is empty but we just played something
         recent_by_count = await self.playback.get_recent_history(guild_id, limit=20)
-        recent_yt_ids.update(r["canonical_yt_id"] for r in recent_by_count)
+        recent_yt_ids.update(r["canonical_yt_id"] for r in recent_by_count if r.get("canonical_yt_id"))
+        recent_song_keys = {
+            self._song_key(r.get("title"), r.get("artist_name"))
+            for r in recent_by_count
+            if r.get("title") and r.get("artist_name")
+        }
         
         # Roll strategy
         strategies = list(weights.keys())
         strategy_weights = [weights[s] for s in strategies]
         strategy = random.choices(strategies, weights=strategy_weights, k=1)[0]
         
-        logger.info(f"Discovery for user {turn_user_id} using strategy: {strategy} (avoiding {len(recent_yt_ids)} recent songs)")
+        logger.info(
+            f"Discovery for user {turn_user_id} using strategy: {strategy} "
+            f"(avoiding {len(recent_yt_ids)} recent ids, {len(recent_song_keys)} recent songs)"
+        )
         
         # Execute strategy
-        track = await self._execute_strategy(strategy, turn_user_id, recent_yt_ids)
+        track = await self._execute_strategy(strategy, turn_user_id, recent_yt_ids, recent_song_keys)
         
         # Advance turn for next time
         self.turn_tracker.advance(guild_id)
@@ -175,25 +190,35 @@ class DiscoveryEngine:
         strategy: str,
         user_id: int,
         recent_yt_ids: set[str],
+        recent_song_keys: set[str],
     ) -> YTTrack | None:
         """Execute a discovery strategy."""
         if strategy == "similar":
-            return await self._strategy_similar(user_id, recent_yt_ids)
+            return await self._strategy_similar(user_id, recent_yt_ids, recent_song_keys)
         elif strategy == "artist":
-            return await self._strategy_artist(user_id, recent_yt_ids)
+            return await self._strategy_artist(user_id, recent_yt_ids, recent_song_keys)
         elif strategy == "wildcard":
-            return await self._strategy_wildcard(recent_yt_ids)
+            return await self._strategy_wildcard(recent_yt_ids, recent_song_keys)
         elif strategy == "library":
-            return await self._strategy_library(user_id, recent_yt_ids)
+            return await self._strategy_library(user_id, recent_yt_ids, recent_song_keys)
         return None
     
-    async def _strategy_library(self, user_id: int, recent_yt_ids: set[str]) -> YTTrack | None:
+    async def _strategy_library(
+        self,
+        user_id: int,
+        recent_yt_ids: set[str],
+        recent_song_keys: set[str],
+    ) -> YTTrack | None:
         """Fetch a random song from user's liked library."""
         # Get user's liked songs
         liked = await self.reactions.get_liked_songs(user_id, limit=100)
         
-        # Filter out recent songs
-        candidates = [t for t in liked if t.get("canonical_yt_id") not in recent_yt_ids]
+        # Filter out recent songs by ID and song identity.
+        candidates = [
+            t for t in liked
+            if t.get("canonical_yt_id") not in recent_yt_ids
+            and self._song_key(t.get("title"), t.get("artist_name")) not in recent_song_keys
+        ]
         
         if candidates:
             # Pick a random liked song
@@ -207,15 +232,20 @@ class DiscoveryEngine:
             )
         
         # Fallback to wildcard if library is empty or all songs recently played
-        return await self._strategy_wildcard(recent_yt_ids)
+        return await self._strategy_wildcard(recent_yt_ids, recent_song_keys)
     
-    async def _strategy_similar(self, user_id: int, recent_yt_ids: set[str]) -> YTTrack | None:
+    async def _strategy_similar(
+        self,
+        user_id: int,
+        recent_yt_ids: set[str],
+        recent_song_keys: set[str],
+    ) -> YTTrack | None:
         """Find a similar song based on user's liked songs."""
         # Get user's liked songs
         liked = await self.reactions.get_liked_songs(user_id, limit=20)
         if not liked:
             # Fallback to wildcard if no liked songs
-            return await self._strategy_wildcard(recent_yt_ids)
+            return await self._strategy_wildcard(recent_yt_ids, recent_song_keys)
         
         # Pick a random liked song to base recommendations on
         seed_song = random.choice(liked)
@@ -227,6 +257,7 @@ class DiscoveryEngine:
         candidates = [
             t for t in related
             if t.video_id not in recent_yt_ids
+            and self._song_key(t.title, t.artist) not in recent_song_keys
             and t.artist.lower() != seed_song["artist_name"].lower()
         ]
         
@@ -237,14 +268,19 @@ class DiscoveryEngine:
         
         return None
     
-    async def _strategy_artist(self, user_id: int, recent_yt_ids: set[str]) -> YTTrack | None:
+    async def _strategy_artist(
+        self,
+        user_id: int,
+        recent_yt_ids: set[str],
+        recent_song_keys: set[str],
+    ) -> YTTrack | None:
         """Find a different song from a liked artist."""
         # Get user's top artists from preferences
         top_artists = await self.preferences.get_top_preferences(user_id, "artist", limit=10)
         
         if not top_artists:
             # Fallback to wildcard
-            return await self._strategy_wildcard(recent_yt_ids)
+            return await self._strategy_wildcard(recent_yt_ids, recent_song_keys)
         
         # Try a few artists
         for artist_name, _ in random.sample(top_artists, min(3, len(top_artists))):
@@ -256,7 +292,11 @@ class DiscoveryEngine:
                 for track in random.sample(top_tracks, min(5, len(top_tracks))):
                     # Normalize to get YT video ID
                     normalized = await self.normalizer.normalize(track.title, track.artist)
-                    if normalized and normalized.canonical_yt_id not in recent_yt_ids:
+                    if (
+                        normalized
+                        and normalized.canonical_yt_id not in recent_yt_ids
+                        and self._song_key(normalized.clean_title, normalized.clean_artist) not in recent_song_keys
+                    ):
                         return YTTrack(
                             video_id=normalized.canonical_yt_id,
                             title=normalized.clean_title,
@@ -265,7 +305,7 @@ class DiscoveryEngine:
         
         return None
     
-    async def _strategy_wildcard(self, recent_yt_ids: set[str]) -> YTTrack | None:
+    async def _strategy_wildcard(self, recent_yt_ids: set[str], recent_song_keys: set[str]) -> YTTrack | None:
         """Get a random song from charts."""
         # Randomly pick US or UK charts
         region = random.choice(["US", "UK"])
@@ -277,7 +317,11 @@ class DiscoveryEngine:
         if not playlists:
             # Fallback: direct search for popular songs
             results = await self.youtube.search("top hits 2024", filter_type="songs", limit=20)
-            candidates = [t for t in results if t.video_id not in recent_yt_ids]
+            candidates = [
+                t for t in results
+                if t.video_id not in recent_yt_ids
+                and self._song_key(t.title, t.artist) not in recent_song_keys
+            ]
             if candidates:
                 return random.choice(candidates)
             return None
@@ -287,7 +331,11 @@ class DiscoveryEngine:
         tracks = await self.youtube.get_playlist_tracks(playlist["browse_id"], limit=50)
         
         # Filter out recent
-        candidates = [t for t in tracks if t.video_id not in recent_yt_ids]
+        candidates = [
+            t for t in tracks
+            if t.video_id not in recent_yt_ids
+            and self._song_key(t.title, t.artist) not in recent_song_keys
+        ]
         
         if candidates:
             return random.choice(candidates)
