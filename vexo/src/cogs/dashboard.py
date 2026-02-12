@@ -185,6 +185,8 @@ class DashboardCog(commands.Cog):
         self.app.router.add_post("/api/settings/global", self._handle_global_settings)
         self.app.router.add_get("/api/notifications", self._handle_notifications)
         self.app.router.add_post("/api/guilds/{guild_id}/leave", self._handle_leave_guild)
+        self.app.router.add_get("/api/obs/status", self._handle_obs_status)
+        self.app.router.add_get("/api/obs/audio", self._handle_obs_audio)
         
         # Service management
         self.app.router.add_get("/api/services", self._handle_services_list)
@@ -394,6 +396,63 @@ class DashboardCog(commands.Cog):
             "ram_percent": psutil.virtual_memory().percent,
             "process_ram_mb": round(process.memory_info().rss / 1024 / 1024, 2)
         })
+
+    async def _handle_obs_status(self, request: web.Request) -> web.Response:
+        """Get OBS relay status for dashboard/debugging."""
+        music = self.bot.get_cog("MusicCog")
+        if not music or not hasattr(music, "get_obs_audio_status"):
+            return web.json_response({"enabled": False, "available": False})
+
+        status = await music.get_obs_audio_status()
+        status["available"] = True
+        status["url"] = f"http://{request.host}/api/obs/audio"
+        return web.json_response(status)
+
+    async def _handle_obs_audio(self, request: web.Request) -> web.StreamResponse:
+        """Stream live MP3 audio so OBS can add it as a media source."""
+        if not self._is_loopback(request) and not self._is_admin(request):
+            return web.Response(status=401, text="unauthorized")
+
+        music = self.bot.get_cog("MusicCog")
+        if not music or not hasattr(music, "subscribe_obs_audio"):
+            return web.Response(status=503, text="music cog unavailable")
+
+        queue = await music.subscribe_obs_audio()
+        if not queue:
+            return web.Response(status=404, text="obs audio relay disabled")
+
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "audio/mpeg",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await response.prepare(request)
+
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(queue.get(), timeout=30)
+                except asyncio.TimeoutError:
+                    if request.transport is None or request.transport.is_closing():
+                        break
+                    continue
+
+                await response.write(chunk)
+        except (ConnectionResetError, RuntimeError, asyncio.CancelledError):
+            pass
+        finally:
+            await music.unsubscribe_obs_audio(queue)
+            try:
+                await response.write_eof()
+            except Exception:
+                pass
+
+        return response
     
     async def _handle_guilds(self, request: web.Request) -> web.Response:
         music = self.bot.get_cog("MusicCog")
@@ -475,6 +534,12 @@ class DashboardCog(commands.Cog):
                  await crud.set_setting(guild_id, "replay_cooldown", str(data["replay_cooldown"]))
             if "max_song_duration" in data:
                  await crud.set_setting(guild_id, "max_song_duration", str(data["max_song_duration"]))
+            if "sticky_now_playing_enabled" in data:
+                 await crud.set_setting(guild_id, "sticky_now_playing_enabled", bool(data["sticky_now_playing_enabled"]))
+            if "now_playing_artwork_enabled" in data:
+                 await crud.set_setting(guild_id, "now_playing_artwork_enabled", bool(data["now_playing_artwork_enabled"]))
+            if "radio_presenter_enabled" in data:
+                 await crud.set_setting(guild_id, "radio_presenter_enabled", bool(data["radio_presenter_enabled"]))
                  
             # Apply to active player if exists
             music = self.bot.get_cog("MusicCog")

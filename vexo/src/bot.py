@@ -4,6 +4,7 @@ Smart Discord Music Bot - Main Entry Point
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -47,6 +48,9 @@ class MusicBot(commands.Bot):
         # Interaction timing (for command start/end logs)
         self._interaction_started: dict[int, dict] = {}
         self._loop_lag_task: asyncio.Task | None = None
+        self._connection_watchdog_task: asyncio.Task | None = None
+        self._last_disconnect_at: float | None = None
+        self._last_resume_at: float | None = None
 
     @staticmethod
     def _truncate(value, max_len: int = 240) -> str:
@@ -206,6 +210,8 @@ class MusicBot(commands.Bot):
         # Event loop lag monitor (helps diagnose interaction 404s caused by stalls)
         if not self._loop_lag_task:
             self._loop_lag_task = asyncio.create_task(self._loop_lag_monitor())
+        if not self._connection_watchdog_task:
+            self._connection_watchdog_task = asyncio.create_task(self._connection_watchdog_loop())
         
         # Store start time for uptime tracking
         from datetime import datetime, UTC
@@ -281,6 +287,17 @@ class MusicBot(commands.Bot):
             name="/play"
         )
         await self.change_presence(activity=activity)
+
+    async def on_disconnect(self) -> None:
+        self._last_disconnect_at = time.time()
+        log.warning_cat(Category.SYSTEM, "gateway_disconnected")
+
+    async def on_resumed(self) -> None:
+        self._last_resume_at = time.time()
+        down_for_ms = None
+        if self._last_disconnect_at:
+            down_for_ms = int((self._last_resume_at - self._last_disconnect_at) * 1000)
+        log.info_cat(Category.SYSTEM, "gateway_resumed", down_for_ms=down_for_ms)
     
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Called when the bot joins a new guild."""
@@ -316,6 +333,9 @@ class MusicBot(commands.Bot):
         if self._loop_lag_task:
             self._loop_lag_task.cancel()
             self._loop_lag_task = None
+        if self._connection_watchdog_task:
+            self._connection_watchdog_task.cancel()
+            self._connection_watchdog_task = None
         
         # Disconnect from all voice channels
         for vc in self.voice_clients:
@@ -330,6 +350,7 @@ class MusicBot(commands.Bot):
         """Periodically measure event-loop lag and log warnings when it spikes."""
         interval = 1.0
         warn_ms = 500
+        dump_tasks = os.getenv("VEXO_LAG_DIAGNOSTICS", "").strip().lower() in {"1", "true", "yes", "on"}
         last = time.perf_counter()
         while True:
             await asyncio.sleep(interval)
@@ -337,7 +358,66 @@ class MusicBot(commands.Bot):
             drift_ms = int((now - last - interval) * 1000)
             last = now
             if drift_ms >= warn_ms:
-                log.warning_cat(Category.SYSTEM, "event_loop_lag", module=__name__, drift_ms=drift_ms)
+                extra = {}
+                if dump_tasks:
+                    try:
+                        tasks = [t for t in asyncio.all_tasks() if not t.done()]
+                        # Summarize by coroutine name to keep logs small.
+                        coros: dict[str, int] = {}
+                        for t in tasks:
+                            try:
+                                c = t.get_coro()
+                                name = getattr(c, "__qualname__", None) or getattr(c, "__name__", None) or type(c).__name__
+                            except Exception:
+                                name = "unknown"
+                            coros[name] = coros.get(name, 0) + 1
+
+                        top = sorted(coros.items(), key=lambda kv: kv[1], reverse=True)[:8]
+                        extra = {
+                            "task_count": len(tasks),
+                            "top_tasks": ", ".join([f"{n}:{c}" for n, c in top]) if top else None,
+                        }
+                    except Exception:
+                        extra = {}
+
+                log.warning_cat(Category.SYSTEM, "event_loop_lag", module=__name__, drift_ms=drift_ms, **extra)
+
+    async def _connection_watchdog_loop(self) -> None:
+        """Track Discord gateway health and reconcile music voice state periodically."""
+        degraded_streak = 0
+        interval_s = 20
+        while True:
+            await asyncio.sleep(interval_s)
+
+            ws = getattr(self, "ws", None)
+            ws_closed = bool(ws is None or getattr(ws, "closed", True))
+            ready = self.is_ready()
+            latency_ms = int(self.latency * 1000) if self.latency else None
+
+            if ws_closed or not ready:
+                degraded_streak += 1
+                if degraded_streak in {3, 6, 12}:
+                    log.warning_cat(
+                        Category.SYSTEM,
+                        "gateway_unhealthy",
+                        streak=degraded_streak,
+                        ws_closed=ws_closed,
+                        ready=ready,
+                        latency_ms=latency_ms,
+                    )
+            else:
+                if degraded_streak >= 3:
+                    log.info_cat(Category.SYSTEM, "gateway_healthy", streak=degraded_streak, latency_ms=latency_ms)
+                degraded_streak = 0
+
+            # Keep music cog/player state synced to Discord's actual voice-client state.
+            try:
+                music = self.get_cog("MusicCog")
+                reconcile = getattr(music, "reconcile_voice_state", None) if music else None
+                if reconcile:
+                    await reconcile()
+            except Exception as e:
+                log.debug_cat(Category.SYSTEM, "connection_watchdog_reconcile_failed", error=str(e))
 
 
 async def main():

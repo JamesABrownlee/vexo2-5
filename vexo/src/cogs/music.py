@@ -3,6 +3,7 @@ import logging
 import time
 import collections
 import random
+import shlex
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, UTC
 from typing import Optional
@@ -105,6 +106,7 @@ class GuildPlayer:
     _last_health_check: datetime = field(default_factory=lambda: datetime.now(UTC))
     _np_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _current_source: discord.AudioSource | None = None
+    _current_stream_info: StreamInfo | None = None
 
 
 class MusicCog(commands.Cog):
@@ -219,6 +221,11 @@ class MusicCog(commands.Cog):
         self._radio_presenter_disabled_until: datetime | None = None
         self._radio_presenter_last_error: str | None = None
         self._background_tasks_started: bool = False
+        self._obs_audio_subscribers: set[asyncio.Queue[bytes]] = set()
+        self._obs_relay_lock = asyncio.Lock()
+        self._obs_relay_task: asyncio.Task | None = None
+        self._obs_relay_process: asyncio.subprocess.Process | None = None
+        self._obs_relay_guild_id: int | None = None
 
     def _start_background_tasks(self, *, reason: str) -> None:
         if self._background_tasks_started:
@@ -264,6 +271,7 @@ class MusicCog(commands.Cog):
             self._idle_check_task.cancel()
         if self._radio_presenter_task:
             self._radio_presenter_task.cancel()
+        await self._stop_obs_relay()
         self._background_tasks_started = False
 
         # Disconnect from all voice channels
@@ -278,6 +286,245 @@ class MusicCog(commands.Cog):
         if guild_id not in self.players:
             self.players[guild_id] = GuildPlayer(guild_id=guild_id)
         return self.players[guild_id]
+
+    @staticmethod
+    def _as_bool(value, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    async def _guild_bool_setting(self, guild_id: int, key: str, default: bool = True) -> bool:
+        if not hasattr(self.bot, "db") or not self.bot.db:
+            return default
+        try:
+            guild_crud = GuildCRUD(self.bot.db)
+            value = await guild_crud.get_setting(guild_id, key)
+            return self._as_bool(value, default)
+        except Exception:
+            return default
+
+    def _obs_enabled(self) -> bool:
+        try:
+            from src.config import config
+            return bool(getattr(config, "OBS_AUDIO_ENABLED", False))
+        except Exception:
+            return False
+
+    async def subscribe_obs_audio(self) -> asyncio.Queue[bytes] | None:
+        """Register an OBS audio subscriber queue."""
+        if not self._obs_enabled():
+            return None
+
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)
+        async with self._obs_relay_lock:
+            self._obs_audio_subscribers.add(queue)
+        await self._ensure_obs_relay_state()
+        return queue
+
+    async def unsubscribe_obs_audio(self, queue: asyncio.Queue[bytes]) -> None:
+        """Remove an OBS audio subscriber queue."""
+        async with self._obs_relay_lock:
+            self._obs_audio_subscribers.discard(queue)
+        await self._ensure_obs_relay_state()
+
+    async def get_obs_audio_status(self) -> dict:
+        """Expose OBS relay state for dashboard/API responses."""
+        async with self._obs_relay_lock:
+            listener_count = len(self._obs_audio_subscribers)
+            relay_running = bool(self._obs_relay_task and not self._obs_relay_task.done())
+            relay_guild_id = self._obs_relay_guild_id
+
+        return {
+            "enabled": self._obs_enabled(),
+            "listeners": listener_count,
+            "relay_running": relay_running,
+            "relay_guild_id": relay_guild_id,
+        }
+
+    async def _stop_obs_relay(self) -> None:
+        """Stop OBS relay task/process if running."""
+        async with self._obs_relay_lock:
+            task = self._obs_relay_task
+            proc = self._obs_relay_process
+            self._obs_relay_task = None
+            self._obs_relay_process = None
+            self._obs_relay_guild_id = None
+
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        if proc and proc.returncode is None:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+
+    async def _pick_obs_source_player(self) -> GuildPlayer | None:
+        """Choose one active guild player as OBS source."""
+        candidates = []
+        for player in self.players.values():
+            if not player.current or not player._current_stream_info:
+                continue
+            if not player.voice_client or not player.voice_client.is_connected():
+                continue
+            candidates.append(player)
+
+        if not candidates:
+            return None
+
+        return max(
+            candidates,
+            key=lambda p: p.start_time or datetime.min.replace(tzinfo=UTC),
+        )
+
+    async def _ensure_obs_relay_state(self) -> None:
+        """Start/stop relay based on listeners and active playback."""
+        if not self._obs_enabled():
+            await self._stop_obs_relay()
+            return
+
+        async with self._obs_relay_lock:
+            has_listeners = bool(self._obs_audio_subscribers)
+        if not has_listeners:
+            await self._stop_obs_relay()
+            return
+
+        source_player = await self._pick_obs_source_player()
+        if not source_player:
+            await self._stop_obs_relay()
+            return
+
+        source_info = source_player._current_stream_info
+        if not source_info:
+            await self._stop_obs_relay()
+            return
+
+        async with self._obs_relay_lock:
+            same_guild = self._obs_relay_guild_id == source_player.guild_id
+            task_running = bool(self._obs_relay_task and not self._obs_relay_task.done())
+
+        if same_guild and task_running:
+            return
+
+        await self._stop_obs_relay()
+        relay_task = asyncio.create_task(self._run_obs_relay(source_player.guild_id, source_info))
+        async with self._obs_relay_lock:
+            self._obs_relay_task = relay_task
+            self._obs_relay_guild_id = source_player.guild_id
+
+    async def _drain_obs_stderr(self, proc: asyncio.subprocess.Process, guild_id: int) -> None:
+        """Drain ffmpeg stderr so the pipe cannot block the relay process."""
+        try:
+            if not proc.stderr:
+                return
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                msg = line.decode(errors="ignore").strip()
+                if msg:
+                    log.debug_cat(Category.API, "obs_relay_ffmpeg", guild_id=guild_id, message=msg[:300])
+        except Exception:
+            pass
+
+    async def _run_obs_relay(self, guild_id: int, stream_info: StreamInfo) -> None:
+        """Run FFmpeg that transcodes current track to MP3 and fanouts to HTTP subscribers."""
+        from src.config import config
+
+        ffmpeg_opts = self._build_ffmpeg_options(stream_info, bitrate=max(32, int(config.OBS_AUDIO_BITRATE_KBPS)))
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            *shlex.split(ffmpeg_opts["before_options"]),
+            "-i",
+            stream_info.url,
+            *shlex.split(ffmpeg_opts["options"]),
+            "-f",
+            "mp3",
+            "pipe:1",
+        ]
+
+        proc: asyncio.subprocess.Process | None = None
+        stderr_task: asyncio.Task | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            async with self._obs_relay_lock:
+                self._obs_relay_process = proc
+
+            stderr_task = asyncio.create_task(self._drain_obs_stderr(proc, guild_id))
+            log.info_cat(Category.API, "obs_relay_started", guild_id=guild_id)
+
+            while True:
+                if not proc.stdout:
+                    break
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+
+                async with self._obs_relay_lock:
+                    subscribers = list(self._obs_audio_subscribers)
+
+                for queue in subscribers:
+                    try:
+                        if queue.full():
+                            try:
+                                queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                        queue.put_nowait(chunk)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning_cat(Category.API, "obs_relay_failed", guild_id=guild_id, error=str(e))
+        finally:
+            if proc and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
+                try:
+                    await stderr_task
+                except Exception:
+                    pass
+
+            async with self._obs_relay_lock:
+                if self._obs_relay_process is proc:
+                    self._obs_relay_process = None
+                if self._obs_relay_task and self._obs_relay_task.done():
+                    self._obs_relay_task = None
+                    self._obs_relay_guild_id = None
+            log.info_cat(Category.API, "obs_relay_stopped", guild_id=guild_id)
 
     async def _log_track_start(self, player: GuildPlayer, item: QueueItem) -> int | None:
         """Log track start to database and update library."""
@@ -348,6 +595,10 @@ class MusicCog(commands.Cog):
     async def _notify_radio_presenter(self, player: GuildPlayer, item: QueueItem) -> None:
         """Notify external radio-presenter/TTS service that a song is starting."""
         try:
+            if not await self._guild_bool_setting(player.guild_id, "radio_presenter_enabled", True):
+                log.debug_cat(Category.API, "radio_presenter_notify_skipped", reason="guild_disabled", guild_id=player.guild_id)
+                return
+
             from src.config import config
 
             url = getattr(config, "RADIO_PRESENTER_API_URL", None)
@@ -605,7 +856,9 @@ class MusicCog(commands.Cog):
                         continue
                     item.url = stream_info.url
                 else:
-                    stream_info = StreamInfo(url=item.url) 
+                    stream_info = StreamInfo(url=item.url)
+
+                player._current_stream_info = stream_info
 
                 player._consecutive_failures = 0
 
@@ -626,6 +879,7 @@ class MusicCog(commands.Cog):
                     play_complete = asyncio.Event()
                     player.voice_client.play(source, after=lambda _: self.bot.loop.call_soon_threadsafe(play_complete.set))
                     player.start_time = datetime.now(UTC)
+                    await self._ensure_obs_relay_state()
 
                     asyncio.create_task(self._spotify_enrich_and_refresh_now_playing(player, item))
 
@@ -663,6 +917,8 @@ class MusicCog(commands.Cog):
                 finally:
                     player.current = None
                     player._current_source = None
+                    player._current_stream_info = None
+                    await self._ensure_obs_relay_state()
                     # Trigger maintenance after song ends
                     asyncio.create_task(self._fill_queue_if_needed(player))
         
@@ -670,6 +926,8 @@ class MusicCog(commands.Cog):
             player.is_playing = False
             player.current = None
             player._current_source = None
+            player._current_stream_info = None
+            await self._ensure_obs_relay_state()
             if player._maintenance_task:
                 player._maintenance_task.cancel()
 
@@ -951,7 +1209,7 @@ class MusicCog(commands.Cog):
         if metadata_changed:
             try:
                 # Give the initial Now Playing send a chance to complete to avoid racing two sends.
-                await asyncio.sleep(1)
+                await asyncio.sleep(3)
                 if not player.current or player.current.video_id != item.video_id:
                     return
                 await self._notify_now_playing(player)
@@ -1011,6 +1269,51 @@ class MusicCog(commands.Cog):
                         player.is_playing = False
                         player._consecutive_failures = 0
                         # Restart loop happens in next iteration if autoplay is on or queue not empty
+
+    async def reconcile_voice_state(self) -> None:
+        """Reconcile internal player voice state with discord.py's guild voice clients."""
+        for guild_id, player in list(self.players.items()):
+            guild = self.bot.get_guild(guild_id)
+            guild_vc = guild.voice_client if guild else None
+
+            # Prefer discord.py's active guild voice client as source of truth.
+            if guild_vc and guild_vc.is_connected():
+                if player.voice_client is not guild_vc:
+                    player.voice_client = guild_vc
+                    log.debug_cat(Category.VOICE, "voice_state_reconciled", guild_id=guild_id, action="attach_guild_vc")
+
+                # Auto-heal playback loop if queue exists and we are connected but loop isn't running.
+                if (not player.is_playing) and (player.current or not player.queue.empty()):
+                    asyncio.create_task(self._play_loop(player))
+                    log.info_cat(Category.PLAYBACK, "playback_loop_restarted", guild_id=guild_id, reason="watchdog_reconcile")
+                continue
+
+            # No connected guild VC -> normalize stale state.
+            if player.voice_client and not player.voice_client.is_connected():
+                player.voice_client = None
+            if not guild_vc and player.is_playing:
+                player.is_playing = False
+
+    async def _confirm_voice_disconnect(self, guild_id: int, guild_name: str) -> None:
+        """Delay-confirm a bot voice disconnect to avoid false positives during reconnect handshakes."""
+        await asyncio.sleep(2.0)
+        player = self.players.get(guild_id)
+        if not player:
+            return
+
+        vc = player.voice_client
+        if vc and vc.is_connected():
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        guild_vc = guild.voice_client if guild else None
+        if guild_vc and guild_vc.is_connected():
+            player.voice_client = guild_vc
+            return
+
+        player.voice_client = None
+        player.is_playing = False
+        log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild=guild_name, reason="bot_disconnected")
     
     # ==================== EVENTS ====================
     
@@ -1024,12 +1327,12 @@ class MusicCog(commands.Cog):
         """Handle voice state changes."""
         # Handle bot being disconnected or moved
         if member.id == self.bot.user.id:
-            if not after.channel: # Bot was disconnected
+            if after.channel:
                 player = self.players.get(member.guild.id)
-                if player:
-                    player.voice_client = None
-                    player.is_playing = False
-                    log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild=member.guild.name, reason="bot_disconnected")
+                if player and member.guild.voice_client:
+                    player.voice_client = member.guild.voice_client
+            elif before.channel and not after.channel:
+                asyncio.create_task(self._confirm_voice_disconnect(member.guild.id, member.guild.name))
             return
 
         if member.bot:

@@ -108,6 +108,14 @@ The web dashboard is available at `http://localhost:8080` (localhost only, no au
 | `WEB_HOST` | Dashboard host | `127.0.0.1` |
 | `WEB_PORT` | Dashboard port | `8080` |
 | `YTDL_COOKIES_PATH` | Path to YouTube cookies | Optional |
+| `OBS_AUDIO_ENABLED` | Enable live MP3 relay for OBS (`/api/obs/audio`) | `false` |
+| `OBS_AUDIO_BITRATE_KBPS` | Bitrate for OBS relay MP3 stream | `192` |
+
+### OBS Audio Source
+
+1. Set `OBS_AUDIO_ENABLED=true` and restart the bot.
+2. In OBS, add a `Media Source` and use the URL `http://<bot-host>:<WEB_PORT>/api/obs/audio`.
+3. Keep the source open while music is playing in Discord; the bot relays the current track as MP3.
 
 ## 🎲 Discovery Strategies
 

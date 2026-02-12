@@ -35,10 +35,20 @@ class Config:
     # Optional: Radio presenter / TTS integration
     RADIO_PRESENTER_API_URL: str | None
     RADIO_PRESENTER_VOICE: str | None
+
+    # Optional: OBS audio relay integration
+    OBS_AUDIO_ENABLED: bool
+    OBS_AUDIO_BITRATE_KBPS: int
     
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
+        def _bool_env(name: str, default: bool = False) -> bool:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+
         discord_token = os.getenv("DISCORD_TOKEN")
         if not discord_token:
             raise ValueError("DISCORD_TOKEN environment variable is required")
@@ -63,6 +73,8 @@ class Config:
             YTDL_PO_TOKEN=os.getenv("YTDL_PO_TOKEN"),
             RADIO_PRESENTER_API_URL=os.getenv("RADIO_PRESENTER_API_URL", "http://100.97.230.126:3050/api/radio-presenter"),
             RADIO_PRESENTER_VOICE=os.getenv("RADIO_PRESENTER_VOICE"),
+            OBS_AUDIO_ENABLED=_bool_env("OBS_AUDIO_ENABLED", False),
+            OBS_AUDIO_BITRATE_KBPS=max(32, int(os.getenv("OBS_AUDIO_BITRATE_KBPS", "192"))),
         )
 
 

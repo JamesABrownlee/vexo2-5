@@ -13,6 +13,8 @@ services:
       - DATABASE_PATH=/app/data/musicbot.db
       - RADIO_PRESENTER_API_URL=${RADIO_PRESENTER_API_URL:-http://radio-presenter:5090/api/radio-presenter}
       - RADIO_PRESENTER_VOICE=${RADIO_PRESENTER_VOICE}
+      - OBS_AUDIO_ENABLED=${OBS_AUDIO_ENABLED:-false}
+      - OBS_AUDIO_BITRATE_KBPS=${OBS_AUDIO_BITRATE_KBPS:-192}
     volumes:
       - ./data:/app/data
     ports:
