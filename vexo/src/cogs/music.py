@@ -1313,30 +1313,43 @@ class MusicCog(commands.Cog):
                 player.is_playing = False
 
     async def _confirm_voice_disconnect(self, guild_id: int, guild_name: str) -> None:
-        """Delay-confirm a bot voice disconnect to avoid false positives during reconnect handshakes."""
-        await asyncio.sleep(2.0)
+        """Confirm a bot voice disconnect with retry window to tolerate transient WS drops."""
+        # Voice reconnects can take a few seconds; only declare disconnect after repeated checks.
+        for delay_s in (1.0, 1.5, 2.0, 2.5):
+            await asyncio.sleep(delay_s)
+
+            player = self.players.get(guild_id)
+            if not player:
+                return
+
+            vc = player.voice_client
+            if vc and vc.is_connected():
+                return
+
+            guild = self.bot.get_guild(guild_id)
+            guild_vc = guild.voice_client if guild else None
+            if guild_vc:
+                # Keep attached to guild VC while reconnect is in-flight.
+                player.voice_client = guild_vc
+                if guild_vc.is_connected():
+                    if player.current or not player.queue.empty():
+                        try:
+                            await self.ensure_play_loop(player, reason="voice_reconnect_confirm")
+                        except Exception:
+                            pass
+                return
+
+            # If member voice state still shows us in a channel, reconnect is not settled yet.
+            try:
+                me = guild.me if guild else None
+                if me and me.voice and me.voice.channel:
+                    continue
+            except Exception:
+                pass
+
         player = self.players.get(guild_id)
         if not player:
             return
-
-        vc = player.voice_client
-        if vc and vc.is_connected():
-            return
-
-        guild = self.bot.get_guild(guild_id)
-        guild_vc = guild.voice_client if guild else None
-        if guild_vc:
-            # During voice WS recovery discord.py may expose a guild VC object
-            # before it reports as connected. Treat this as reconnect-in-flight.
-            player.voice_client = guild_vc
-            if guild_vc.is_connected():
-                if player.current or not player.queue.empty():
-                    try:
-                        await self.ensure_play_loop(player, reason="voice_reconnect_confirm")
-                    except Exception:
-                        pass
-            return
-
         player.voice_client = None
         player.is_playing = False
         log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild=guild_name, reason="bot_disconnected")

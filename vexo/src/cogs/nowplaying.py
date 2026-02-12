@@ -550,6 +550,8 @@ class NowPlayingCog(commands.Cog):
         self._np_worker_events: dict[int, asyncio.Event] = {}
         self._np_pending_updates: dict[int, dict[str, bool]] = {}
         self._np_pending_swaps: dict[int, dict[str, int | str]] = {}
+        self._np_last_video_sent: dict[int, str] = {}
+        self._np_artwork_swap_attempted_video: dict[int, str] = {}
 
     @property
     def music(self):
@@ -573,6 +575,8 @@ class NowPlayingCog(commands.Cog):
         self._np_worker_events.clear()
         self._np_pending_updates.clear()
         self._np_pending_swaps.clear()
+        self._np_last_video_sent.clear()
+        self._np_artwork_swap_attempted_video.clear()
 
         if self._persistent_view:
             try:
@@ -804,6 +808,15 @@ class NowPlayingCog(commands.Cog):
 
         item = player.current
         video_id = item.video_id
+        last_video_id = self._np_last_video_sent.get(player.guild_id)
+
+        # New song -> allow one fresh artwork attempt.
+        if last_video_id != video_id:
+            self._np_artwork_swap_attempted_video.pop(player.guild_id, None)
+
+        # Drop duplicate refreshes for the same song.
+        if not repost and not force and last_video_id == video_id:
+            return
 
         # Create view with dynamic queue select options (top 10)
         queue_items = list(player.queue._queue)[:10]
@@ -918,6 +931,7 @@ class NowPlayingCog(commands.Cog):
                         )
 
                 player.last_np_msg = msg
+                self._np_last_video_sent[player.guild_id] = video_id
 
                 if hasattr(self.bot, "db") and self.bot.db:
                     try:
@@ -927,7 +941,11 @@ class NowPlayingCog(commands.Cog):
                         log.debug_cat(Category.SYSTEM, "Failed to persist Now Playing message", error=str(e), guild_id=player.guild_id)
 
             # Fetch image and swap the message after releasing the lock.
-            if existing_art is None:
+            if (
+                existing_art is None
+                and self._np_artwork_swap_attempted_video.get(player.guild_id) != video_id
+            ):
+                self._np_artwork_swap_attempted_video[player.guild_id] = video_id
                 await self._enqueue_now_playing_swap(
                     guild_id=player.guild_id,
                     channel_id=player.text_channel_id,
@@ -1118,48 +1136,17 @@ class NowPlayingCog(commands.Cog):
                     except Exception:
                         pass
         except Exception as e:
-            # If we already have an attachment on the message, don't overwrite with an "artwork unavailable" embed.
-            # This can happen if the image was posted successfully but an edit step failed afterward.
-            try:
-                if getattr(msg, "attachments", None):
-                    log.debug_cat(
-                        Category.SYSTEM,
-                        "now_playing_image_swap_failed_but_attachment_present",
-                        guild_id=guild_id,
-                        channel_id=channel_id,
-                        message_id=message_id,
-                        video_id=video_id,
-                        error=str(e),
-                    )
-                    try:
-                        await self._discord_call_with_backoff(
-                            guild_id,
-                            "swap_failure_update_view_only",
-                            lambda: msg.edit(view=view),
-                        )
-                    except Exception:
-                        pass
-                    return
-
-                err_embed = discord.Embed(
-                    title="🎵 Now Playing",
-                    description=f"**{item.title}**\n{item.artist}\n\n⚠️ Artwork unavailable.",
-                    color=0x7c3aed,
-                )
-                try:
-                    await self._discord_call_with_backoff(
-                        guild_id,
-                        "swap_failure_set_error_embed_with_attachments",
-                        lambda: msg.edit(embed=err_embed, view=view, attachments=[]),
-                    )
-                except TypeError:
-                    await self._discord_call_with_backoff(
-                        guild_id,
-                        "swap_failure_set_error_embed",
-                        lambda: msg.edit(embed=err_embed, view=view),
-                    )
-            except Exception:
-                pass
+            # Keep the initial embed unchanged when artwork generation fails.
+            log.debug_cat(
+                Category.SYSTEM,
+                "now_playing_image_swap_failed",
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                video_id=video_id,
+                error=str(e),
+            )
+            return
 
     @app_commands.command(name="nowplaying", description="Show the current song")
     async def nowplaying(self, interaction: discord.Interaction):
