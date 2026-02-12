@@ -54,7 +54,7 @@ class NowPlayingView(discord.ui.View):
 
             if select_options:
                 select = discord.ui.Select(
-                    placeholder="â­ï¸ Choose next song...",
+                    placeholder="⏭️ Choose next song...",
                     custom_id="np:skip_to",
                     options=select_options,
                     min_values=1,
@@ -91,7 +91,7 @@ class NowPlayingView(discord.ui.View):
         now = time.monotonic()
         if now < self._cooldown_until_monotonic:
             remaining = max(0.0, self._cooldown_until_monotonic - now)
-            await self._safe_send(interaction, f"â³ Controls cooling down. Try again in {remaining:.1f}s.", ephemeral=True)
+            await self._safe_send(interaction, f"⏳ Controls cooling down. Try again in {remaining:.1f}s.", ephemeral=True)
             return False
 
         self._cooldown_until_monotonic = now + self._interaction_cooldown_s
@@ -200,11 +200,11 @@ class NowPlayingView(discord.ui.View):
             pass
 
         try:
-            await self._safe_send(interaction, "âŒ That button failed. Try again.", ephemeral=True)
+            await self._safe_send(interaction, "❌ That button failed. Try again.", ephemeral=True)
         except Exception:
             return
 
-    @discord.ui.button(emoji="â¸", style=discord.ButtonStyle.secondary, custom_id="np:pause_resume")
+    @discord.ui.button(emoji="⏸", style=discord.ButtonStyle.secondary, custom_id="np:pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -227,11 +227,11 @@ class NowPlayingView(discord.ui.View):
 
         guild_id = self._guild_id_from_interaction(interaction)
         if not guild_id:
-            await self._safe_send(interaction, "âŒ This button can only be used in a server.", ephemeral=True)
+            await self._safe_send(interaction, "❌ This button can only be used in a server.", ephemeral=True)
             return
 
         if self._busy_lock.locked():
-            await self._safe_send(interaction, "â³ Bot is busy â€” try again in a moment.", ephemeral=True)
+            await self._safe_send(interaction, "⏳ Bot is busy — try again in a moment.", ephemeral=True)
             return
 
         if not await self._begin_interaction_cooldown(interaction):
@@ -243,17 +243,17 @@ class NowPlayingView(discord.ui.View):
                 if player.voice_client:
                     if player.voice_client.is_playing():
                         player.voice_client.pause()
-                        await self._safe_send(interaction, "â¸ Paused", ephemeral=True)
+                        await self._safe_send(interaction, "⏸ Paused", ephemeral=True)
                     elif player.voice_client.is_paused():
                         player.voice_client.resume()
-                        await self._safe_send(interaction, "â–¶ Resumed", ephemeral=True)
+                        await self._safe_send(interaction, "▶ Resumed", ephemeral=True)
             except Exception as e:
                 log.exception_cat(Category.SYSTEM, "NowPlayingView pause/resume failed", error=str(e))
                 return
             finally:
                 await self._end_interaction_cooldown(interaction)
 
-    @discord.ui.button(emoji="â¹", style=discord.ButtonStyle.danger, custom_id="np:stop")
+    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, custom_id="np:stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -276,11 +276,11 @@ class NowPlayingView(discord.ui.View):
 
         guild_id = self._guild_id_from_interaction(interaction)
         if not guild_id:
-            await self._safe_send(interaction, "âŒ This button can only be used in a server.", ephemeral=True)
+            await self._safe_send(interaction, "❌ This button can only be used in a server.", ephemeral=True)
             return
 
         if self._busy_lock.locked():
-            await self._safe_send(interaction, "â³ Bot is busy â€” try again in a moment.", ephemeral=True)
+            await self._safe_send(interaction, "⏳ Bot is busy — try again in a moment.", ephemeral=True)
             return
 
         if not await self._begin_interaction_cooldown(interaction):
@@ -304,7 +304,7 @@ class NowPlayingView(discord.ui.View):
                 await player.voice_client.disconnect()
                 player.voice_client = None
 
-                await self._safe_send(interaction, "â¹ Stopped and cleared queue!", ephemeral=True)
+                await self._safe_send(interaction, "⏹ Stopped and cleared queue!", ephemeral=True)
                 # Keep disabled until a new Now Playing message is posted.
             except Exception as e:
                 log.exception_cat(Category.SYSTEM, "NowPlayingView stop failed", error=str(e))
@@ -312,7 +312,7 @@ class NowPlayingView(discord.ui.View):
             finally:
                 await self._end_interaction_cooldown(interaction, keep_disabled=True)
 
-    @discord.ui.button(emoji="â­", style=discord.ButtonStyle.secondary, custom_id="np:skip")
+    @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.secondary, custom_id="np:skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -335,11 +335,11 @@ class NowPlayingView(discord.ui.View):
 
         guild_id = self._guild_id_from_interaction(interaction)
         if not guild_id:
-            await self._safe_send(interaction, "âŒ This button can only be used in a server.", ephemeral=True)
+            await self._safe_send(interaction, "❌ This button can only be used in a server.", ephemeral=True)
             return
 
         if self._busy_lock.locked():
-            await self._safe_send(interaction, "â³ Bot is busy â€” try again in a moment.", ephemeral=True)
+            await self._safe_send(interaction, "⏳ Bot is busy — try again in a moment.", ephemeral=True)
             return
 
         if not await self._begin_interaction_cooldown(interaction):
@@ -350,14 +350,14 @@ class NowPlayingView(discord.ui.View):
                 player = music.get_player(guild_id)
                 if player.voice_client and player.is_playing:
                     player.voice_client.stop()
-                    await self._safe_send(interaction, "â­ï¸ Skipped!", ephemeral=True)
+                    await self._safe_send(interaction, "⏭️ Skipped!", ephemeral=True)
             except Exception as e:
                 log.exception_cat(Category.SYSTEM, "NowPlayingView skip failed", error=str(e))
                 return
             finally:
                 await self._end_interaction_cooldown(interaction)
 
-    @discord.ui.button(emoji="â¤ï¸", style=discord.ButtonStyle.secondary, custom_id="np:like")
+    @discord.ui.button(emoji="❤️", style=discord.ButtonStyle.secondary, custom_id="np:like")
     async def like(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -380,11 +380,11 @@ class NowPlayingView(discord.ui.View):
 
         guild_id = self._guild_id_from_interaction(interaction)
         if not guild_id:
-            await self._safe_send(interaction, "âŒ This button can only be used in a server.", ephemeral=True)
+            await self._safe_send(interaction, "❌ This button can only be used in a server.", ephemeral=True)
             return
 
         if self._busy_lock.locked():
-            await self._safe_send(interaction, "â³ Bot is busy â€” try again in a moment.", ephemeral=True)
+            await self._safe_send(interaction, "⏳ Bot is busy — try again in a moment.", ephemeral=True)
             return
 
         if not await self._begin_interaction_cooldown(interaction):
@@ -413,14 +413,14 @@ class NowPlayingView(discord.ui.View):
                     except Exception as e:
                         log.error_cat(Category.USER, "Failed to log like", error=str(e))
     
-                await self._safe_send(interaction, f"â¤ï¸ Liked **{title}**!", ephemeral=True)
+                await self._safe_send(interaction, f"❤️ Liked **{title}**!", ephemeral=True)
         except Exception as e:
             log.exception_cat(Category.SYSTEM, "NowPlayingView like failed", error=str(e))
             return
         finally:
             await self._end_interaction_cooldown(interaction)
 
-    @discord.ui.button(emoji="ðŸ‘Ž", style=discord.ButtonStyle.secondary, custom_id="np:dislike")
+    @discord.ui.button(emoji="👎", style=discord.ButtonStyle.secondary, custom_id="np:dislike")
     async def dislike(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -443,11 +443,11 @@ class NowPlayingView(discord.ui.View):
 
         guild_id = self._guild_id_from_interaction(interaction)
         if not guild_id:
-            await self._safe_send(interaction, "âŒ This button can only be used in a server.", ephemeral=True)
+            await self._safe_send(interaction, "❌ This button can only be used in a server.", ephemeral=True)
             return
 
         if self._busy_lock.locked():
-            await self._safe_send(interaction, "â³ Bot is busy â€” try again in a moment.", ephemeral=True)
+            await self._safe_send(interaction, "⏳ Bot is busy — try again in a moment.", ephemeral=True)
             return
 
         if not await self._begin_interaction_cooldown(interaction):
@@ -473,7 +473,7 @@ class NowPlayingView(discord.ui.View):
                     except Exception as e:
                         log.error_cat(Category.USER, "Failed to log dislike", error=str(e))
     
-            await self._safe_send(interaction, f"ðŸ‘Ž Disliked **{title}**", ephemeral=True)
+            await self._safe_send(interaction, f"👎 Disliked **{title}**", ephemeral=True)
         except Exception as e:
             log.exception_cat(Category.SYSTEM, "NowPlayingView dislike failed", error=str(e))
             return
@@ -501,11 +501,11 @@ class NowPlayingView(discord.ui.View):
 
         guild_id = self._guild_id_from_interaction(interaction)
         if not guild_id:
-            await self._safe_send(interaction, "âŒ This can only be used in a server.", ephemeral=True)
+            await self._safe_send(interaction, "❌ This can only be used in a server.", ephemeral=True)
             return
 
         if self._busy_lock.locked():
-            await self._safe_send(interaction, "â³ Bot is busy â€” try again in a moment.", ephemeral=True)
+            await self._safe_send(interaction, "⏳ Bot is busy — try again in a moment.", ephemeral=True)
             return
 
         if not await self._begin_interaction_cooldown(interaction):
@@ -520,7 +520,7 @@ class NowPlayingView(discord.ui.View):
                 queue_items = list(player.queue._queue)
     
                 if selected_index < 0 or selected_index >= len(queue_items):
-                    await self._safe_send(interaction, "âŒ Invalid queue position.", ephemeral=True)
+                    await self._safe_send(interaction, "❌ Invalid queue position.", ephemeral=True)
                     return
     
                 # Remove all items before the selected index
@@ -531,10 +531,10 @@ class NowPlayingView(discord.ui.View):
                         break
     
                 selected_song = queue_items[selected_index]
-            await self._safe_send(interaction, f"â­ï¸ Skipped to **{selected_song.title}**", ephemeral=True)
+            await self._safe_send(interaction, f"⏭️ Skipped to **{selected_song.title}**", ephemeral=True)
         except Exception as e:
             log.exception_cat(Category.SYSTEM, "NowPlayingView skip_to failed", error=str(e))
-            await self._safe_send(interaction, "âŒ Error skipping to song.", ephemeral=True)
+            await self._safe_send(interaction, "❌ Error skipping to song.", ephemeral=True)
         finally:
             await self._end_interaction_cooldown(interaction)
 
@@ -681,11 +681,12 @@ class NowPlayingCog(commands.Cog):
         self._np_worker_events[guild_id] = event
         self._np_worker_tasks[guild_id] = asyncio.create_task(self._np_worker_loop(guild_id))
 
-    async def _enqueue_now_playing_update(self, guild_id: int, *, repost: bool, force: bool) -> None:
+    async def _enqueue_now_playing_update(self, guild_id: int, player, *, repost: bool, force: bool) -> None:
         pending = self._np_pending_updates.get(guild_id)
         if pending is None:
-            pending = {"repost": repost, "force": force}
+            pending = {"player": player, "repost": repost, "force": force}
         else:
+            pending["player"] = player
             pending["repost"] = pending["repost"] or repost
             pending["force"] = pending["force"] or force
         self._np_pending_updates[guild_id] = pending
@@ -724,11 +725,9 @@ class NowPlayingCog(commands.Cog):
                     if elapsed < self._np_worker_spacing_s:
                         await asyncio.sleep(self._np_worker_spacing_s - elapsed)
 
-                    music = self.music
-                    if not music:
-                        continue
-                    player = music.get_player(guild_id)
+                    player = pending.get("player")
                     if not player:
+                        log.debug_cat(Category.SYSTEM, "now_playing_worker_missing_player", guild_id=guild_id)
                         continue
 
                     try:
@@ -780,7 +779,7 @@ class NowPlayingCog(commands.Cog):
     async def send_now_playing_for_player(self, player, *, repost: bool = False, force: bool = False) -> None:
         if not player:
             return
-        await self._enqueue_now_playing_update(player.guild_id, repost=repost, force=force)
+        await self._enqueue_now_playing_update(player.guild_id, player, repost=repost, force=force)
 
     async def _send_now_playing_for_player_impl(self, player, *, repost: bool = False, force: bool = False) -> None:
         """Post a Now Playing view immediately with a loading embed, then swap to the image when ready.
@@ -792,7 +791,16 @@ class NowPlayingCog(commands.Cog):
 
         channel = self.bot.get_channel(player.text_channel_id)
         if not channel:
-            return
+            try:
+                channel = await self.bot.fetch_channel(player.text_channel_id)
+            except Exception:
+                log.debug_cat(
+                    Category.SYSTEM,
+                    "now_playing_channel_not_found",
+                    guild_id=player.guild_id,
+                    channel_id=player.text_channel_id,
+                )
+                return
 
         item = player.current
         video_id = item.video_id
@@ -802,7 +810,7 @@ class NowPlayingCog(commands.Cog):
         view = NowPlayingView(self.bot, queue_items=queue_items)
 
         loading_embed = discord.Embed(
-            title="ðŸŽµ Now Playing",
+            title="🎵 Now Playing",
             description=f"<a:discordloading:1470579528760950977>\nTrack: **{item.title}**\nArtist: {item.artist}",
             color=0x7c3aed,
         )
@@ -1134,8 +1142,8 @@ class NowPlayingCog(commands.Cog):
                     return
 
                 err_embed = discord.Embed(
-                    title="ðŸŽµ Now Playing",
-                    description=f"**{item.title}**\n{item.artist}\n\nâš ï¸ Artwork unavailable.",
+                    title="🎵 Now Playing",
+                    description=f"**{item.title}**\n{item.artist}\n\n⚠️ Artwork unavailable.",
                     color=0x7c3aed,
                 )
                 try:
@@ -1167,16 +1175,16 @@ class NowPlayingCog(commands.Cog):
         ):
             music = self.music
             if not music:
-                await interaction.response.send_message("âŒ Music system is not loaded.", ephemeral=True)
+                await interaction.response.send_message("❌ Music system is not loaded.", ephemeral=True)
                 return
 
             player = music.get_player(interaction.guild_id)
             if not player.current:
-                await interaction.response.send_message("âŒ Nothing is playing", ephemeral=True)
+                await interaction.response.send_message("❌ Nothing is playing", ephemeral=True)
                 return
 
             embed = discord.Embed(
-                title="ðŸŽµ Now Playing",
+                title="🎵 Now Playing",
                 description=f"**{player.current.title}**\nby {player.current.artist}",
                 color=discord.Color.green(),
             )
@@ -1187,7 +1195,7 @@ class NowPlayingCog(commands.Cog):
             if player.current.for_user_id:
                 user = self.bot.get_user(player.current.for_user_id)
                 if user:
-                    embed.set_footer(text=f"ðŸŽ² Playing for {user.display_name}")
+                    embed.set_footer(text=f"🎲 Playing for {user.display_name}")
             elif player.current.requester_id:
                 user = self.bot.get_user(player.current.requester_id)
                 if user:
