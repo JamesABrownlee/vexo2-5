@@ -127,7 +127,14 @@ class NowPlayingView(discord.ui.View):
         try:
             t0 = time.perf_counter()
             try:
-                await interaction.response.defer(ephemeral=ephemeral)
+                # Prefer "thinking" ACK for components, but support older discord libs.
+                try:
+                    await interaction.response.defer(thinking=True, ephemeral=ephemeral)
+                except TypeError:
+                    try:
+                        await interaction.response.defer(ephemeral=ephemeral)
+                    except TypeError:
+                        await interaction.response.defer()
             except discord.InteractionResponded:
                 log.debug_cat(
                     Category.USER,
@@ -348,9 +355,11 @@ class NowPlayingView(discord.ui.View):
         async with self._busy_lock:
             try:
                 player = music.get_player(guild_id)
-                if player.voice_client and player.is_playing:
+                if player.voice_client and (player.is_playing or player.voice_client.is_playing()):
                     player.voice_client.stop()
                     await self._safe_send(interaction, "⏭️ Skipped!", ephemeral=True)
+                else:
+                    await self._safe_send(interaction, "ℹ️ Nothing is currently playing to skip.", ephemeral=True)
             except Exception as e:
                 log.exception_cat(Category.SYSTEM, "NowPlayingView skip failed", error=str(e))
                 return

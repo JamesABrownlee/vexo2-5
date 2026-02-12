@@ -6,10 +6,13 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from collections import deque
-from datetime import datetime
+from datetime import datetime, UTC, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
+import aiohttp
 from aiohttp import web
 
 from discord.ext import commands
@@ -128,6 +131,7 @@ class DashboardCog(commands.Cog):
         self._log_handler: WebSocketLogHandler | None = None
         self._cog_admin_token = os.getenv("WEB_ADMIN_TOKEN")
         self._cog_action_lock = asyncio.Lock()
+        self._oauth_session_ttl_hours = 24 * 14
     
     async def cog_load(self):
         self.app = web.Application()
@@ -160,6 +164,13 @@ class DashboardCog(commands.Cog):
         
         # API
         self.app.router.add_get("/api/status", self._handle_status)
+        self.app.router.add_get("/api/auth/config", self._handle_auth_config)
+        self.app.router.add_get("/api/auth/discord/start", self._handle_discord_auth_start)
+        self.app.router.add_get("/api/auth/discord/callback", self._handle_discord_auth_callback)
+        self.app.router.add_get("/api/auth/me", self._handle_auth_me)
+        self.app.router.add_post("/api/auth/logout", self._handle_auth_logout)
+        self.app.router.add_get("/api/auth/spotify/start", self._handle_spotify_auth_start)
+        self.app.router.add_get("/api/auth/spotify/callback", self._handle_spotify_auth_callback)
         self.app.router.add_get("/api/guilds", self._handle_guilds)
         self.app.router.add_get("/api/guilds/{guild_id}", self._handle_guild_detail)
         self.app.router.add_get("/api/guilds/{guild_id}/settings", self._handle_guild_settings)
@@ -190,6 +201,481 @@ class DashboardCog(commands.Cog):
         # Service management
         self.app.router.add_get("/api/services", self._handle_services_list)
         self.app.router.add_post("/api/services/{service_id}/restart", self._handle_service_restart)
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(UTC)
+
+    @staticmethod
+    def _to_iso(dt: datetime) -> str:
+        return dt.astimezone(UTC).isoformat()
+
+    @staticmethod
+    def _from_iso(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _wants_json(request: web.Request) -> bool:
+        return request.query.get("format") == "json"
+
+    async def _create_oauth_state(
+        self,
+        *,
+        provider: str,
+        owner_discord_id: int | None = None,
+        redirect_path: str | None = None,
+        ttl_minutes: int = 10,
+    ) -> str:
+        if not hasattr(self.bot, "db") or not self.bot.db:
+            raise RuntimeError("database unavailable")
+
+        state = secrets.token_urlsafe(32)
+        expires_at = self._to_iso(self._utc_now() + timedelta(minutes=ttl_minutes))
+
+        # Best-effort cleanup to avoid unbounded state table growth.
+        await self.bot.db.execute(
+            "DELETE FROM oauth_states WHERE expires_at < ?",
+            (self._to_iso(self._utc_now()),),
+        )
+        await self.bot.db.execute(
+            """
+            INSERT INTO oauth_states (state, provider, owner_discord_id, redirect_path, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (state, provider, owner_discord_id, redirect_path, expires_at),
+        )
+        return state
+
+    async def _consume_oauth_state(self, *, state: str, provider: str) -> dict | None:
+        if not hasattr(self.bot, "db") or not self.bot.db:
+            return None
+
+        row = await self.bot.db.fetch_one(
+            "SELECT * FROM oauth_states WHERE state = ? AND provider = ?",
+            (state, provider),
+        )
+        await self.bot.db.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+        if not row:
+            return None
+
+        expires_at = self._from_iso(row.get("expires_at"))
+        if not expires_at or expires_at < self._utc_now():
+            return None
+        return row
+
+    def _oauth_cookie_secure(self) -> bool:
+        try:
+            from src.config import config
+            return bool(getattr(config, "OAUTH_SESSION_COOKIE_SECURE", False))
+        except Exception:
+            return False
+
+    def _session_token_from_request(self, request: web.Request) -> str | None:
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+            if token:
+                return token
+        cookie_token = request.cookies.get("vexo_session")
+        return cookie_token.strip() if cookie_token else None
+
+    async def _get_active_auth_session(self, request: web.Request) -> dict | None:
+        token = self._session_token_from_request(request)
+        if not token or not hasattr(self.bot, "db") or not self.bot.db:
+            return None
+
+        row = await self.bot.db.fetch_one(
+            """
+            SELECT * FROM auth_sessions
+            WHERE session_token = ? AND revoked_at IS NULL
+            """,
+            (token,),
+        )
+        if not row:
+            return None
+
+        expires_at = self._from_iso(row.get("expires_at"))
+        if not expires_at or expires_at < self._utc_now():
+            await self.bot.db.execute(
+                "UPDATE auth_sessions SET revoked_at = ? WHERE session_token = ?",
+                (self._to_iso(self._utc_now()), token),
+            )
+            return None
+        return row
+
+    async def _handle_auth_config(self, request: web.Request) -> web.Response:
+        from src.config import config
+
+        discord_enabled = bool(
+            config.DISCORD_OAUTH_CLIENT_ID
+            and config.DISCORD_OAUTH_CLIENT_SECRET
+            and config.DISCORD_OAUTH_REDIRECT_URI
+        )
+        spotify_enabled = bool(
+            config.SPOTIFY_OAUTH_CLIENT_ID
+            and config.SPOTIFY_OAUTH_CLIENT_SECRET
+            and config.SPOTIFY_OAUTH_REDIRECT_URI
+        )
+        return web.json_response(
+            {
+                "discord_oauth_enabled": discord_enabled,
+                "spotify_oauth_enabled": spotify_enabled,
+                "discord_login_required_for_spotify_link": True,
+            }
+        )
+
+    async def _handle_discord_auth_start(self, request: web.Request) -> web.Response:
+        from src.config import config
+
+        if not (
+            config.DISCORD_OAUTH_CLIENT_ID
+            and config.DISCORD_OAUTH_CLIENT_SECRET
+            and config.DISCORD_OAUTH_REDIRECT_URI
+        ):
+            return web.json_response({"error": "discord_oauth_not_configured"}, status=503)
+
+        redirect_path = request.query.get("redirect") or "/"
+        state = await self._create_oauth_state(
+            provider="discord",
+            owner_discord_id=None,
+            redirect_path=redirect_path,
+        )
+        params = urlencode(
+            {
+                "client_id": config.DISCORD_OAUTH_CLIENT_ID,
+                "response_type": "code",
+                "redirect_uri": config.DISCORD_OAUTH_REDIRECT_URI,
+                "scope": "identify email",
+                "state": state,
+                "prompt": "consent",
+            }
+        )
+        return web.HTTPFound(f"https://discord.com/api/oauth2/authorize?{params}")
+
+    async def _handle_discord_auth_callback(self, request: web.Request) -> web.Response:
+        from src.config import config
+        from src.database.crud import UserCRUD
+
+        code = request.query.get("code")
+        state = request.query.get("state")
+        if not code or not state:
+            return web.json_response({"error": "missing_code_or_state"}, status=400)
+
+        state_row = await self._consume_oauth_state(state=state, provider="discord")
+        if not state_row:
+            return web.json_response({"error": "invalid_or_expired_state"}, status=400)
+
+        token_payload = {
+            "client_id": config.DISCORD_OAUTH_CLIENT_ID,
+            "client_secret": config.DISCORD_OAUTH_CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": config.DISCORD_OAUTH_REDIRECT_URI,
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://discord.com/api/oauth2/token",
+                    data=token_payload,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=15,
+                ) as token_resp:
+                    if token_resp.status >= 300:
+                        text = await token_resp.text()
+                        return web.json_response(
+                            {"error": "discord_token_exchange_failed", "status": token_resp.status, "detail": text},
+                            status=502,
+                        )
+                    token_data = await token_resp.json()
+
+                access_token = token_data.get("access_token")
+                if not access_token:
+                    return web.json_response({"error": "discord_missing_access_token"}, status=502)
+
+                async with session.get(
+                    "https://discord.com/api/users/@me",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=15,
+                ) as me_resp:
+                    if me_resp.status >= 300:
+                        text = await me_resp.text()
+                        return web.json_response(
+                            {"error": "discord_user_fetch_failed", "status": me_resp.status, "detail": text},
+                            status=502,
+                        )
+                    me_data = await me_resp.json()
+        except Exception as e:
+            return web.json_response({"error": "discord_oauth_request_failed", "detail": str(e)}, status=502)
+
+        discord_user_id = int(me_data["id"])
+        username = me_data.get("username")
+        global_name = me_data.get("global_name")
+        avatar = me_data.get("avatar")
+        token_type = token_data.get("token_type")
+        refresh_token = token_data.get("refresh_token")
+        scope = token_data.get("scope")
+        expires_in = int(token_data.get("expires_in", 0) or 0)
+        expires_at = self._to_iso(self._utc_now() + timedelta(seconds=max(0, expires_in)))
+
+        user_crud = UserCRUD(self.bot.db)
+        await user_crud.get_or_create(discord_user_id, username or global_name)
+
+        await self.bot.db.execute(
+            """
+            INSERT INTO discord_auth (
+                discord_user_id, discord_username, discord_global_name, discord_avatar,
+                access_token, refresh_token, token_type, scope, expires_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(discord_user_id) DO UPDATE SET
+                discord_username=excluded.discord_username,
+                discord_global_name=excluded.discord_global_name,
+                discord_avatar=excluded.discord_avatar,
+                access_token=excluded.access_token,
+                refresh_token=excluded.refresh_token,
+                token_type=excluded.token_type,
+                scope=excluded.scope,
+                expires_at=excluded.expires_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                discord_user_id,
+                username,
+                global_name,
+                avatar,
+                access_token,
+                refresh_token,
+                token_type,
+                scope,
+                expires_at,
+                self._to_iso(self._utc_now()),
+            ),
+        )
+
+        session_token = secrets.token_urlsafe(48)
+        session_expires_at = self._to_iso(self._utc_now() + timedelta(hours=self._oauth_session_ttl_hours))
+        await self.bot.db.execute(
+            """
+            INSERT INTO auth_sessions (session_token, discord_user_id, expires_at)
+            VALUES (?, ?, ?)
+            """,
+            (session_token, discord_user_id, session_expires_at),
+        )
+
+        redirect_path = state_row.get("redirect_path") or "/"
+        response_payload = {
+            "authenticated": True,
+            "discord_user_id": str(discord_user_id),
+            "session_token": session_token,
+            "redirect": redirect_path,
+        }
+
+        if self._wants_json(request):
+            resp = web.json_response(response_payload)
+        else:
+            sep = "&" if "?" in redirect_path else "?"
+            resp = web.HTTPFound(f"{redirect_path}{sep}auth=discord_success")
+
+        resp.set_cookie(
+            "vexo_session",
+            session_token,
+            httponly=True,
+            secure=self._oauth_cookie_secure(),
+            samesite="Lax",
+            max_age=int(timedelta(hours=self._oauth_session_ttl_hours).total_seconds()),
+        )
+        return resp
+
+    async def _handle_auth_me(self, request: web.Request) -> web.Response:
+        session = await self._get_active_auth_session(request)
+        if not session:
+            return web.json_response({"authenticated": False})
+
+        discord_user_id = int(session["discord_user_id"])
+        discord_row = await self.bot.db.fetch_one(
+            "SELECT discord_user_id, discord_username, discord_global_name, discord_avatar, scope, linked_at, updated_at FROM discord_auth WHERE discord_user_id = ?",
+            (discord_user_id,),
+        )
+        spotify_row = await self.bot.db.fetch_one(
+            "SELECT spotify_user_id, spotify_display_name, spotify_email, scope, linked_at, updated_at FROM spotify_auth WHERE discord_user_id = ?",
+            (discord_user_id,),
+        )
+
+        return web.json_response(
+            {
+                "authenticated": True,
+                "discord_user_id": str(discord_user_id),
+                "discord": dict(discord_row) if discord_row else None,
+                "spotify_linked": bool(spotify_row),
+                "spotify": dict(spotify_row) if spotify_row else None,
+            }
+        )
+
+    async def _handle_auth_logout(self, request: web.Request) -> web.Response:
+        token = self._session_token_from_request(request)
+        if token and hasattr(self.bot, "db") and self.bot.db:
+            await self.bot.db.execute(
+                "UPDATE auth_sessions SET revoked_at = ? WHERE session_token = ?",
+                (self._to_iso(self._utc_now()), token),
+            )
+        resp = web.json_response({"status": "ok"})
+        resp.del_cookie("vexo_session")
+        return resp
+
+    async def _handle_spotify_auth_start(self, request: web.Request) -> web.Response:
+        from src.config import config
+
+        session = await self._get_active_auth_session(request)
+        if not session:
+            return web.json_response({"error": "discord_auth_required"}, status=401)
+
+        if not (
+            config.SPOTIFY_OAUTH_CLIENT_ID
+            and config.SPOTIFY_OAUTH_CLIENT_SECRET
+            and config.SPOTIFY_OAUTH_REDIRECT_URI
+        ):
+            return web.json_response({"error": "spotify_oauth_not_configured"}, status=503)
+
+        redirect_path = request.query.get("redirect") or "/"
+        state = await self._create_oauth_state(
+            provider="spotify",
+            owner_discord_id=int(session["discord_user_id"]),
+            redirect_path=redirect_path,
+        )
+        params = urlencode(
+            {
+                "client_id": config.SPOTIFY_OAUTH_CLIENT_ID,
+                "response_type": "code",
+                "redirect_uri": config.SPOTIFY_OAUTH_REDIRECT_URI,
+                "scope": "user-read-email user-top-read playlist-read-private playlist-read-collaborative",
+                "state": state,
+                "show_dialog": "true",
+            }
+        )
+        return web.HTTPFound(f"https://accounts.spotify.com/authorize?{params}")
+
+    async def _handle_spotify_auth_callback(self, request: web.Request) -> web.Response:
+        import base64
+        from src.config import config
+
+        code = request.query.get("code")
+        state = request.query.get("state")
+        if not code or not state:
+            return web.json_response({"error": "missing_code_or_state"}, status=400)
+
+        state_row = await self._consume_oauth_state(state=state, provider="spotify")
+        if not state_row:
+            return web.json_response({"error": "invalid_or_expired_state"}, status=400)
+
+        owner_discord_id = state_row.get("owner_discord_id")
+        if not owner_discord_id:
+            return web.json_response({"error": "spotify_state_missing_owner"}, status=400)
+
+        basic = base64.b64encode(
+            f"{config.SPOTIFY_OAUTH_CLIENT_ID}:{config.SPOTIFY_OAUTH_CLIENT_SECRET}".encode("utf-8")
+        ).decode("utf-8")
+        token_payload = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": config.SPOTIFY_OAUTH_REDIRECT_URI,
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://accounts.spotify.com/api/token",
+                    data=token_payload,
+                    headers={
+                        "Authorization": f"Basic {basic}",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    timeout=15,
+                ) as token_resp:
+                    if token_resp.status >= 300:
+                        text = await token_resp.text()
+                        return web.json_response(
+                            {"error": "spotify_token_exchange_failed", "status": token_resp.status, "detail": text},
+                            status=502,
+                        )
+                    token_data = await token_resp.json()
+
+                access_token = token_data.get("access_token")
+                if not access_token:
+                    return web.json_response({"error": "spotify_missing_access_token"}, status=502)
+
+                async with session.get(
+                    "https://api.spotify.com/v1/me",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=15,
+                ) as me_resp:
+                    if me_resp.status >= 300:
+                        text = await me_resp.text()
+                        return web.json_response(
+                            {"error": "spotify_user_fetch_failed", "status": me_resp.status, "detail": text},
+                            status=502,
+                        )
+                    me_data = await me_resp.json()
+        except Exception as e:
+            return web.json_response({"error": "spotify_oauth_request_failed", "detail": str(e)}, status=502)
+
+        spotify_user_id = me_data.get("id")
+        if not spotify_user_id:
+            return web.json_response({"error": "spotify_missing_user_id"}, status=502)
+
+        refresh_token = token_data.get("refresh_token")
+        token_type = token_data.get("token_type")
+        scope = token_data.get("scope")
+        expires_in = int(token_data.get("expires_in", 0) or 0)
+        expires_at = self._to_iso(self._utc_now() + timedelta(seconds=max(0, expires_in)))
+
+        await self.bot.db.execute(
+            """
+            INSERT INTO spotify_auth (
+                discord_user_id, spotify_user_id, spotify_display_name, spotify_email,
+                access_token, refresh_token, token_type, scope, expires_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(discord_user_id) DO UPDATE SET
+                spotify_user_id=excluded.spotify_user_id,
+                spotify_display_name=excluded.spotify_display_name,
+                spotify_email=excluded.spotify_email,
+                access_token=excluded.access_token,
+                refresh_token=COALESCE(excluded.refresh_token, spotify_auth.refresh_token),
+                token_type=excluded.token_type,
+                scope=excluded.scope,
+                expires_at=excluded.expires_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(owner_discord_id),
+                spotify_user_id,
+                me_data.get("display_name"),
+                me_data.get("email"),
+                token_data.get("access_token"),
+                refresh_token,
+                token_type,
+                scope,
+                expires_at,
+                self._to_iso(self._utc_now()),
+            ),
+        )
+
+        redirect_path = state_row.get("redirect_path") or "/"
+        if self._wants_json(request):
+            return web.json_response(
+                {
+                    "linked": True,
+                    "discord_user_id": str(owner_discord_id),
+                    "spotify_user_id": spotify_user_id,
+                    "redirect": redirect_path,
+                }
+            )
+        sep = "&" if "?" in redirect_path else "?"
+        return web.HTTPFound(f"{redirect_path}{sep}auth=spotify_linked")
 
     def _is_loopback(self, request: web.Request) -> bool:
         remote = request.remote or ""

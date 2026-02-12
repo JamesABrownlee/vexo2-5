@@ -143,10 +143,64 @@ CREATE TABLE IF NOT EXISTS now_playing_messages (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- OAuth state nonce store (Discord and Spotify auth flows)
+CREATE TABLE IF NOT EXISTS oauth_states (
+    state TEXT PRIMARY KEY,
+    provider TEXT NOT NULL CHECK(provider IN ('discord', 'spotify')),
+    owner_discord_id INTEGER,
+    redirect_path TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL
+);
+
+-- Dashboard session store keyed by opaque token
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    session_token TEXT PRIMARY KEY,
+    discord_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    revoked_at TIMESTAMP
+);
+
+-- Discord OAuth link and token storage per user
+CREATE TABLE IF NOT EXISTS discord_auth (
+    discord_user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    discord_username TEXT,
+    discord_global_name TEXT,
+    discord_avatar TEXT,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT,
+    token_type TEXT,
+    scope TEXT,
+    expires_at TIMESTAMP,
+    linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Spotify OAuth link and token storage per Discord user
+CREATE TABLE IF NOT EXISTS spotify_auth (
+    discord_user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    spotify_user_id TEXT NOT NULL,
+    spotify_display_name TEXT,
+    spotify_email TEXT,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT,
+    token_type TEXT,
+    scope TEXT,
+    expires_at TIMESTAMP,
+    linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Index for library queries
 CREATE INDEX IF NOT EXISTS idx_library_song ON song_library_entries(song_id);
 CREATE INDEX IF NOT EXISTS idx_library_user ON song_library_entries(user_id);
 CREATE INDEX IF NOT EXISTS idx_now_playing_channel ON now_playing_messages(channel_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_states_provider ON oauth_states(provider);
+CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(discord_user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_auth_user ON spotify_auth(spotify_user_id);
 
 
 -- Indexes for performance

@@ -39,6 +39,15 @@ class Config:
     # Optional: OBS audio relay integration
     OBS_AUDIO_ENABLED: bool
     OBS_AUDIO_BITRATE_KBPS: int
+
+    # Optional: OAuth scaffolding for dashboard auth
+    DISCORD_OAUTH_CLIENT_ID: str | None
+    DISCORD_OAUTH_CLIENT_SECRET: str | None
+    DISCORD_OAUTH_REDIRECT_URI: str | None
+    SPOTIFY_OAUTH_CLIENT_ID: str | None
+    SPOTIFY_OAUTH_CLIENT_SECRET: str | None
+    SPOTIFY_OAUTH_REDIRECT_URI: str | None
+    OAUTH_SESSION_COOKIE_SECURE: bool
     
     @classmethod
     def from_env(cls) -> "Config":
@@ -75,6 +84,13 @@ class Config:
             RADIO_PRESENTER_VOICE=os.getenv("RADIO_PRESENTER_VOICE"),
             OBS_AUDIO_ENABLED=_bool_env("OBS_AUDIO_ENABLED", False),
             OBS_AUDIO_BITRATE_KBPS=max(32, int(os.getenv("OBS_AUDIO_BITRATE_KBPS", "192"))),
+            DISCORD_OAUTH_CLIENT_ID=os.getenv("DISCORD_OAUTH_CLIENT_ID"),
+            DISCORD_OAUTH_CLIENT_SECRET=os.getenv("DISCORD_OAUTH_CLIENT_SECRET"),
+            DISCORD_OAUTH_REDIRECT_URI=os.getenv("DISCORD_OAUTH_REDIRECT_URI"),
+            SPOTIFY_OAUTH_CLIENT_ID=os.getenv("SPOTIFY_OAUTH_CLIENT_ID") or spotify_client_id,
+            SPOTIFY_OAUTH_CLIENT_SECRET=os.getenv("SPOTIFY_OAUTH_CLIENT_SECRET") or spotify_client_secret,
+            SPOTIFY_OAUTH_REDIRECT_URI=os.getenv("SPOTIFY_OAUTH_REDIRECT_URI"),
+            OAUTH_SESSION_COOKIE_SECURE=_bool_env("OAUTH_SESSION_COOKIE_SECURE", False),
         )
 
 
