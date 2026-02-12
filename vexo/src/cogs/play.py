@@ -352,13 +352,16 @@ class PlayCog(commands.Cog):
             await interaction.response.send_message("❌ Music system is not loaded.", ephemeral=True)
             return
 
+        can_respond = True
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.InteractionResponded:
             pass
         except discord.NotFound:
             log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_any")
-            return
+            # Continue command execution even if the interaction token expired.
+            # This avoids a no-op command when Discord ACK timing is missed during startup lag.
+            can_respond = False
         except Exception as e:
             log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_any", error=str(e))
             return
@@ -375,7 +378,11 @@ class PlayCog(commands.Cog):
         ):
 
             if not interaction.user.voice:
-                await interaction.followup.send("❌ You need to be in a voice channel!", ephemeral=True)
+                if can_respond:
+                    try:
+                        await interaction.followup.send("❌ You need to be in a voice channel!", ephemeral=True)
+                    except Exception:
+                        pass
                 return
 
             voice_channel = interaction.user.voice.channel
@@ -390,7 +397,11 @@ class PlayCog(commands.Cog):
                     if not player.is_playing and not player.queue.empty():
                         await music.ensure_play_loop(player, reason="reconnection")
                 except Exception as e:
-                    await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
+                    if can_respond:
+                        try:
+                            await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
+                        except Exception:
+                            pass
                     return
 
             player.autoplay = True
@@ -398,7 +409,11 @@ class PlayCog(commands.Cog):
 
             await music.ensure_play_loop(player, reason="play_any")
 
-            await interaction.followup.send("🎲 **Discovery mode activated!** Finding songs for you...", ephemeral=True)
+            if can_respond:
+                try:
+                    await interaction.followup.send("🎲 **Discovery mode activated!** Finding songs for you...", ephemeral=True)
+                except Exception:
+                    pass
 
 
 async def setup(bot: commands.Bot):
