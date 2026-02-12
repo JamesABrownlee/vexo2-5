@@ -355,8 +355,24 @@ class NowPlayingView(discord.ui.View):
         async with self._busy_lock:
             try:
                 player = music.get_player(guild_id)
-                if player.voice_client and (player.is_playing or player.voice_client.is_playing()):
-                    player.voice_client.stop()
+                vc = player.voice_client
+                # Recover stale player VC references after transient reconnects.
+                if (not vc or not vc.is_connected()) and interaction.guild:
+                    guild_vc = interaction.guild.voice_client
+                    if guild_vc and guild_vc.is_connected():
+                        vc = guild_vc
+                        player.voice_client = guild_vc
+
+                if not vc:
+                    await self._safe_send(interaction, "ℹ️ Bot is not connected to voice.", ephemeral=True)
+                    return
+
+                # If there is a current track, treat this as skippable even if is_playing flags are stale.
+                if player.current is not None or vc.is_playing() or vc.is_paused():
+                    try:
+                        vc.stop()
+                    except Exception:
+                        pass
                     await self._safe_send(interaction, "⏭️ Skipped!", ephemeral=True)
                 else:
                     await self._safe_send(interaction, "ℹ️ Nothing is currently playing to skip.", ephemeral=True)
