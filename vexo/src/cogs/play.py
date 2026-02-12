@@ -206,8 +206,7 @@ class PlayCog(commands.Cog):
             player.queue.put_at_front(item)
             player.last_activity = datetime.now(UTC)
 
-            if not player.is_playing:
-                await music.ensure_play_loop(player, reason="play_song")
+            await music.ensure_play_loop(player, reason="play_song")
 
             embed = discord.Embed(
                 title="🎵 Added to Queue",
@@ -334,8 +333,7 @@ class PlayCog(commands.Cog):
 
             player.last_activity = datetime.now(UTC)
 
-            if not player.is_playing:
-                await music.ensure_play_loop(player, reason="play_artist")
+            await music.ensure_play_loop(player, reason="play_artist")
 
             embed = discord.Embed(
                 title="👩‍🎤 Artist Radio Queued",
@@ -398,8 +396,7 @@ class PlayCog(commands.Cog):
             player.autoplay = True
             player.last_activity = datetime.now(UTC)
 
-            if not player.is_playing:
-                await music.ensure_play_loop(player, reason="play_any")
+            await music.ensure_play_loop(player, reason="play_any")
 
             await interaction.followup.send("🎲 **Discovery mode activated!** Finding songs for you...", ephemeral=True)
 

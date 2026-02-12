@@ -1383,7 +1383,10 @@ class MusicCog(commands.Cog):
                     player.voice_client = member.guild.voice_client
                     # Voice WS can reconnect without a fresh /play command.
                     # If there is pending work, ensure playback loop is running again.
-                    if player.current or not player.queue.empty():
+                    if (
+                        player.voice_client.is_connected()
+                        and (player.current or not player.queue.empty())
+                    ):
                         try:
                             await self.ensure_play_loop(player, reason="voice_reconnect")
                         except Exception as e:
