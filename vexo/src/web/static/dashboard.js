@@ -207,7 +207,8 @@ function initLogControls() {
 // ============================================================
 function initWebSocket() {
     try {
-        ws = new WebSocket(`ws://${location.host}/ws/logs`);
+        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+        ws = new WebSocket(`${wsProto}://${location.host}/ws/logs`);
         ws.onopen = () => {
             logState.wsConnected = true;
             updateWsStatus(true);
@@ -1340,6 +1341,13 @@ async function loadSettingsTab() {
 
             const md = document.getElementById('setting-max-duration');
             if (md) md.value = data.max_song_duration || 6;
+
+            const rp = document.getElementById('setting-radio-presenter-enabled');
+            if (rp) {
+                rp.checked = data.radio_presenter_enabled !== undefined
+                    ? !!data.radio_presenter_enabled
+                    : true;
+            }
         } catch (e) { console.error(e); }
     }
 }
@@ -1384,6 +1392,7 @@ async function saveServerSettings() {
     const preBuffer = document.getElementById('setting-pre-buffer').checked;
     const bufferAmount = document.getElementById('setting-buffer-amount').value;
     const maxDuration = document.getElementById('setting-max-duration').value;
+    const radioPresenterEnabled = document.getElementById('setting-radio-presenter-enabled').checked;
 
     try {
         const res = await fetch(API.settings(currentGuild), {
@@ -1392,7 +1401,8 @@ async function saveServerSettings() {
             body: JSON.stringify({
                 pre_buffer: preBuffer,
                 buffer_amount: parseInt(bufferAmount),
-                max_song_duration: parseInt(maxDuration)
+                max_song_duration: parseInt(maxDuration),
+                radio_presenter_enabled: radioPresenterEnabled
             })
         });
 
