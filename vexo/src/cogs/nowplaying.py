@@ -834,14 +834,11 @@ class NowPlayingCog(commands.Cog):
         item = player.current
         video_id = item.video_id
         last_video_id = self._np_last_video_sent.get(player.guild_id)
+        skip_duplicate_refresh = (not repost and not force and last_video_id == video_id)
 
         # New song -> allow one fresh artwork attempt.
         if last_video_id != video_id:
             self._np_artwork_swap_attempted_video.pop(player.guild_id, None)
-
-        # Drop duplicate refreshes for the same song.
-        if not repost and not force and last_video_id == video_id:
-            return
 
         # Create view with dynamic queue select options (top 10)
         queue_items = list(player.queue._queue)[:10]
@@ -893,6 +890,11 @@ class NowPlayingCog(commands.Cog):
                 # Fallback: if we still have the in-memory reference, try reuse it.
                 if msg is None and player.last_np_msg is not None:
                     msg = player.last_np_msg
+
+                # Drop duplicate refreshes only if we still have a message to keep.
+                # If message lookup failed (deleted/missing), continue and recreate it.
+                if skip_duplicate_refresh and msg is not None:
+                    return
 
                 # If we want to bump the message to the bottom, delete it and re-send.
                 if repost and msg is not None:

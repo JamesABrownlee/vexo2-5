@@ -31,6 +31,13 @@ class PlayCog(commands.Cog):
     def music(self):
         return self.bot.get_cog("MusicCog")
 
+    def _was_predeferred(self, interaction: discord.Interaction) -> bool:
+        try:
+            pre = getattr(self.bot, "_predeferred_interactions", None)
+            return bool(pre and int(getattr(interaction, "id", 0) or 0) in pre)
+        except Exception:
+            return False
+
     @play_group.command(name="song", description="Search and play a specific song")
     @app_commands.describe(query="Song name or search query")
     async def play_song(self, interaction: discord.Interaction, query: str):
@@ -41,16 +48,17 @@ class PlayCog(commands.Cog):
             return
 
         # Defer ASAP. Any synchronous work (including logging) before this increases the chance of 404/Unknown interaction.
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.InteractionResponded:
-            pass
-        except discord.NotFound:
-            log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_song", query=query)
-            return
-        except Exception as e:
-            log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_song", error=str(e), query=query)
-            return
+        if not self._was_predeferred(interaction):
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+            except discord.NotFound:
+                log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_song", query=query)
+                return
+            except Exception as e:
+                log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_song", error=str(e), query=query)
+                return
 
         cmd_t0 = time.perf_counter()
         with log.span(
@@ -229,16 +237,17 @@ class PlayCog(commands.Cog):
             await interaction.response.send_message("❌ Music system is not loaded.", ephemeral=True)
             return
 
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.InteractionResponded:
-            pass
-        except discord.NotFound:
-            log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_artist", artist_name=artist_name)
-            return
-        except Exception as e:
-            log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_artist", error=str(e), artist_name=artist_name)
-            return
+        if not self._was_predeferred(interaction):
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+            except discord.NotFound:
+                log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_artist", artist_name=artist_name)
+                return
+            except Exception as e:
+                log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_artist", error=str(e), artist_name=artist_name)
+                return
 
         with log.span(
             Category.SYSTEM,
@@ -353,18 +362,19 @@ class PlayCog(commands.Cog):
             return
 
         can_respond = True
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.InteractionResponded:
-            pass
-        except discord.NotFound:
-            log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_any")
-            # Continue command execution even if the interaction token expired.
-            # This avoids a no-op command when Discord ACK timing is missed during startup lag.
-            can_respond = False
-        except Exception as e:
-            log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_any", error=str(e))
-            return
+        if not self._was_predeferred(interaction):
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+            except discord.NotFound:
+                log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_any")
+                # Continue command execution even if the interaction token expired.
+                # This avoids a no-op command when Discord ACK timing is missed during startup lag.
+                can_respond = False
+            except Exception as e:
+                log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_any", error=str(e))
+                return
 
         with log.span(
             Category.SYSTEM,

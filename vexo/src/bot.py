@@ -47,6 +47,7 @@ class MusicBot(commands.Bot):
 
         # Interaction timing (for command start/end logs)
         self._interaction_started: dict[int, dict] = {}
+        self._predeferred_interactions: set[int] = set()
         self._loop_lag_task: asyncio.Task | None = None
         self._connection_watchdog_task: asyncio.Task | None = None
         self._last_disconnect_at: float | None = None
@@ -139,6 +140,7 @@ class MusicBot(commands.Bot):
                     if cmd_name in {"play", "import"} and not interaction.response.is_done():
                         try:
                             await interaction.response.defer(ephemeral=True)
+                            self._predeferred_interactions.add(int(interaction.id))
                             log.debug_cat(
                                 Category.SYSTEM,
                                 "interaction_predefer_ok",
@@ -177,6 +179,7 @@ class MusicBot(commands.Bot):
         return None
 
     async def on_app_command_completion(self, interaction: discord.Interaction, command) -> None:
+        self._predeferred_interactions.discard(int(getattr(interaction, "id", 0) or 0))
         info = self._interaction_started.pop(getattr(interaction, "id", 0), None) or {}
         t0 = info.get("t0") if isinstance(info, dict) else None
         ms = int((time.perf_counter() - t0) * 1000) if isinstance(t0, (int, float)) else None
@@ -206,6 +209,7 @@ class MusicBot(commands.Bot):
             return
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        self._predeferred_interactions.discard(int(getattr(interaction, "id", 0) or 0))
         info = self._interaction_started.pop(getattr(interaction, "id", 0), None) or {}
         t0 = info.get("t0") if isinstance(info, dict) else None
         ms = int((time.perf_counter() - t0) * 1000) if isinstance(t0, (int, float)) else None
