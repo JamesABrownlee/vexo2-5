@@ -849,7 +849,7 @@ class NowPlayingCog(commands.Cog):
             description=f"Track: **{item.title}**\nArtist: {item.artist}",
             color=0x7c3aed,
         )
-        loading_embed.set_thumbnail(url=item.thumbnail_url)
+        loading_embed.set_thumbnail(url=f"https://img.youtube.com/vi/{item.video_id}/hqdefault.jpg")
         if item.discovery_reason:
             loading_embed.add_field(name="Discovery", value=item.discovery_reason, inline=False)
 
