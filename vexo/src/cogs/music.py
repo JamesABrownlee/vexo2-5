@@ -1265,8 +1265,23 @@ class MusicCog(commands.Cog):
                 if not player.voice_client or not player.voice_client.is_connected():
                     continue
 
-                # Check if idle for too long
-                if not player.is_playing and (now - player.last_activity).seconds > self.IDLE_TIMEOUT:
+                # Check if idle for too long (only when truly inactive).
+                idle_seconds = (now - player.last_activity).total_seconds()
+                vc = player.voice_client
+                vc_active = False
+                try:
+                    vc_active = bool(vc and (vc.is_playing() or vc.is_paused()))
+                except Exception:
+                    vc_active = False
+
+                has_active_work = bool(
+                    player.is_playing
+                    or vc_active
+                    or player.current is not None
+                    or not player.queue.empty()
+                    or player.autoplay
+                )
+                if idle_seconds > self.IDLE_TIMEOUT and not has_active_work:
                     log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild_id=guild_id, reason="idle_timeout")
                     await player.voice_client.disconnect()
                     player.voice_client = None

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Now Playing cog.
 
 Owns:
@@ -849,9 +849,10 @@ class NowPlayingCog(commands.Cog):
 
         loading_embed = discord.Embed(
             title="🎵 Now Playing",
-            description=f"<a:discordloading:1470579528760950977>\nTrack: **{item.title}**\nArtist: {item.artist}",
+            description=f"Track: **{item.title}**\nArtist: {item.artist}",
             color=0x7c3aed,
         )
+        loading_embed.set_thumbnail(url=item.thumbnail_url)
         if item.discovery_reason:
             loading_embed.add_field(name="Discovery", value=item.discovery_reason, inline=False)
 

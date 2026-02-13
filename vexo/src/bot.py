@@ -132,6 +132,32 @@ class MusicBot(commands.Bot):
                         "t0": time.perf_counter(),
                         "options": opts,
                     }
+
+                    # Early ACK for commands that can do heavier startup-time work.
+                    # Their handlers already defer/respond via followups, so pre-defer is safe.
+                    cmd_name = str(data.get("name") or "").lower()
+                    if cmd_name in {"play", "import"} and not interaction.response.is_done():
+                        try:
+                            await interaction.response.defer(ephemeral=True)
+                            log.debug_cat(
+                                Category.SYSTEM,
+                                "interaction_predefer_ok",
+                                module=__name__,
+                                interaction_id=getattr(interaction, "id", None),
+                                command=cmd_name,
+                                guild_id=getattr(interaction, "guild_id", None),
+                            )
+                        except discord.InteractionResponded:
+                            pass
+                        except Exception as e:
+                            log.debug_cat(
+                                Category.SYSTEM,
+                                "interaction_predefer_failed",
+                                module=__name__,
+                                interaction_id=getattr(interaction, "id", None),
+                                command=cmd_name,
+                                error=self._truncate(e),
+                            )
         except Exception as e:
             try:
                 log.exception_cat(
