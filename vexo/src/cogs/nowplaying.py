@@ -19,7 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from src.database.crud import SongCRUD, ReactionCRUD, LibraryCRUD, NowPlayingMessageCRUD
+from src.database.crud import SongCRUD, ReactionCRUD, LibraryCRUD, NowPlayingMessageCRUD, GuildCRUD
 from src.utils.logging import get_logger, Category
 
 log = get_logger(__name__)
@@ -568,7 +568,7 @@ class NowPlayingCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._persistent_view: NowPlayingView | None = None
-        self._sticky_bump_cooldown_s: int = 20
+        self._sticky_bump_cooldown_s: int = 8
         self._last_sticky_bump_at: dict[int, datetime] = {}
         self._np_worker_spacing_s: float = 1.1
         self._np_worker_tasks: dict[int, asyncio.Task] = {}
@@ -577,6 +577,28 @@ class NowPlayingCog(commands.Cog):
         self._np_pending_swaps: dict[int, dict[str, int | str]] = {}
         self._np_last_video_sent: dict[int, str] = {}
         self._np_artwork_swap_attempted_video: dict[int, str] = {}
+
+    @staticmethod
+    def _as_bool(value, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return default
+
+    async def _guild_bool_setting(self, guild_id: int, key: str, default: bool) -> bool:
+        if not hasattr(self.bot, "db") or not self.bot.db:
+            return default
+        try:
+            guild_crud = GuildCRUD(self.bot.db)
+            raw = await guild_crud.get_setting(guild_id, key)
+            return self._as_bool(raw, default)
+        except Exception:
+            return default
 
     @property
     def music(self):
@@ -1021,13 +1043,39 @@ class NowPlayingCog(commands.Cog):
                 return
 
             player = music.get_player(message.guild.id)
-            if not player.current or not player.text_channel_id or not player.is_playing:
+            if not player.current or not player.text_channel_id:
                 return
 
             if message.channel.id != player.text_channel_id:
                 return
 
+            sticky_enabled = await self._guild_bool_setting(message.guild.id, "sticky_now_playing_enabled", True)
+            if not sticky_enabled:
+                return
+
             if not player.last_np_msg:
+                return
+
+            # Ignore the now-playing message itself.
+            if int(message.id) == int(player.last_np_msg.id):
+                return
+
+            # Sticky repost needs message deletion permissions.
+            me = message.guild.me
+            if me is None:
+                return
+            perms = message.channel.permissions_for(me)
+            if not perms.manage_messages:
+                return
+
+            vc = player.voice_client
+            playback_active = bool(
+                player.current
+                and vc
+                and vc.is_connected()
+                and (player.is_playing or vc.is_playing() or vc.is_paused())
+            )
+            if not playback_active:
                 return
 
             # If Now Playing is already the last message, nothing to do.
