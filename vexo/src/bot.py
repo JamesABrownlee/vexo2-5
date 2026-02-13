@@ -138,49 +138,8 @@ class MusicBot(commands.Bot):
                     # Their handlers already defer/respond via followups, so pre-defer is safe.
                     cmd_name = str(data.get("name") or "").lower()
                     if cmd_name in {"play", "import"} and not interaction.response.is_done():
-                        try:
-                            try:
-                                await interaction.response.defer(ephemeral=True)
-                            except TypeError:
-                                await interaction.response.defer()
-                            self._predeferred_interactions.add(int(interaction.id))
-                            log.info_cat(
-                                Category.SYSTEM,
-                                "interaction_predefer_ok",
-                                module=__name__,
-                                interaction_id=getattr(interaction, "id", None),
-                                command=cmd_name,
-                                guild_id=getattr(interaction, "guild_id", None),
-                            )
-                        except discord.InteractionResponded:
-                            log.info_cat(
-                                Category.SYSTEM,
-                                "interaction_predefer_already_responded",
-                                module=__name__,
-                                interaction_id=getattr(interaction, "id", None),
-                                command=cmd_name,
-                                guild_id=getattr(interaction, "guild_id", None),
-                            )
-                        except discord.NotFound:
-                            log.warning_cat(
-                                Category.SYSTEM,
-                                "interaction_predefer_not_found",
-                                module=__name__,
-                                interaction_id=getattr(interaction, "id", None),
-                                command=cmd_name,
-                                guild_id=getattr(interaction, "guild_id", None),
-                                channel_id=getattr(getattr(interaction, "channel", None), "id", None),
-                                user_id=getattr(getattr(interaction, "user", None), "id", None),
-                            )
-                        except Exception as e:
-                            log.warning_cat(
-                                Category.SYSTEM,
-                                "interaction_predefer_failed",
-                                module=__name__,
-                                interaction_id=getattr(interaction, "id", None),
-                                command=cmd_name,
-                                error=self._truncate(e),
-                            )
+                        # Do not await network IO in on_interaction; it can delay app command dispatch.
+                        asyncio.create_task(self._try_predefer(interaction, cmd_name))
         except Exception as e:
             try:
                 log.exception_cat(
@@ -198,6 +157,54 @@ class MusicBot(commands.Bot):
         # (app command tree + component dispatch). The on_interaction event is for observation,
         # and calling super().on_interaction is not required (and may not exist depending on the discord lib).
         return None
+
+    async def _try_predefer(self, interaction: discord.Interaction, cmd_name: str) -> None:
+        """Best-effort early defer for slash commands without blocking command dispatch."""
+        try:
+            if interaction.response.is_done():
+                return
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except TypeError:
+                await interaction.response.defer()
+            self._predeferred_interactions.add(int(interaction.id))
+            log.info_cat(
+                Category.SYSTEM,
+                "interaction_predefer_ok",
+                module=__name__,
+                interaction_id=getattr(interaction, "id", None),
+                command=cmd_name,
+                guild_id=getattr(interaction, "guild_id", None),
+            )
+        except discord.InteractionResponded:
+            log.info_cat(
+                Category.SYSTEM,
+                "interaction_predefer_already_responded",
+                module=__name__,
+                interaction_id=getattr(interaction, "id", None),
+                command=cmd_name,
+                guild_id=getattr(interaction, "guild_id", None),
+            )
+        except discord.NotFound:
+            log.warning_cat(
+                Category.SYSTEM,
+                "interaction_predefer_not_found",
+                module=__name__,
+                interaction_id=getattr(interaction, "id", None),
+                command=cmd_name,
+                guild_id=getattr(interaction, "guild_id", None),
+                channel_id=getattr(getattr(interaction, "channel", None), "id", None),
+                user_id=getattr(getattr(interaction, "user", None), "id", None),
+            )
+        except Exception as e:
+            log.warning_cat(
+                Category.SYSTEM,
+                "interaction_predefer_failed",
+                module=__name__,
+                interaction_id=getattr(interaction, "id", None),
+                command=cmd_name,
+                error=self._truncate(e),
+            )
 
     async def on_app_command_completion(self, interaction: discord.Interaction, command) -> None:
         self._predeferred_interactions.discard(int(getattr(interaction, "id", 0) or 0))
