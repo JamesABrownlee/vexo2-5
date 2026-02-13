@@ -139,9 +139,12 @@ class MusicBot(commands.Bot):
                     cmd_name = str(data.get("name") or "").lower()
                     if cmd_name in {"play", "import"} and not interaction.response.is_done():
                         try:
-                            await interaction.response.defer(ephemeral=True)
+                            try:
+                                await interaction.response.defer(ephemeral=True)
+                            except TypeError:
+                                await interaction.response.defer()
                             self._predeferred_interactions.add(int(interaction.id))
-                            log.debug_cat(
+                            log.info_cat(
                                 Category.SYSTEM,
                                 "interaction_predefer_ok",
                                 module=__name__,
@@ -150,9 +153,27 @@ class MusicBot(commands.Bot):
                                 guild_id=getattr(interaction, "guild_id", None),
                             )
                         except discord.InteractionResponded:
-                            pass
+                            log.info_cat(
+                                Category.SYSTEM,
+                                "interaction_predefer_already_responded",
+                                module=__name__,
+                                interaction_id=getattr(interaction, "id", None),
+                                command=cmd_name,
+                                guild_id=getattr(interaction, "guild_id", None),
+                            )
+                        except discord.NotFound:
+                            log.warning_cat(
+                                Category.SYSTEM,
+                                "interaction_predefer_not_found",
+                                module=__name__,
+                                interaction_id=getattr(interaction, "id", None),
+                                command=cmd_name,
+                                guild_id=getattr(interaction, "guild_id", None),
+                                channel_id=getattr(getattr(interaction, "channel", None), "id", None),
+                                user_id=getattr(getattr(interaction, "user", None), "id", None),
+                            )
                         except Exception as e:
-                            log.debug_cat(
+                            log.warning_cat(
                                 Category.SYSTEM,
                                 "interaction_predefer_failed",
                                 module=__name__,
