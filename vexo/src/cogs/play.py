@@ -38,6 +38,15 @@ class PlayCog(commands.Cog):
         except Exception:
             return False
 
+    async def _safe_channel_notice(self, interaction: discord.Interaction, content: str) -> None:
+        """Fallback notice when interaction token is already expired."""
+        try:
+            channel = getattr(interaction, "channel", None)
+            if channel and hasattr(channel, "send"):
+                await channel.send(content)
+        except Exception:
+            return
+
     @play_group.command(name="song", description="Search and play a specific song")
     @app_commands.describe(query="Song name or search query")
     async def play_song(self, interaction: discord.Interaction, query: str):
@@ -393,6 +402,11 @@ class PlayCog(commands.Cog):
                         await interaction.followup.send("❌ You need to be in a voice channel!", ephemeral=True)
                     except Exception:
                         pass
+                else:
+                    await self._safe_channel_notice(
+                        interaction,
+                        f"{interaction.user.mention} ❌ You need to be in a voice channel.",
+                    )
                 return
 
             voice_channel = interaction.user.voice.channel
@@ -412,6 +426,11 @@ class PlayCog(commands.Cog):
                             await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
                         except Exception:
                             pass
+                    else:
+                        await self._safe_channel_notice(
+                            interaction,
+                            f"{interaction.user.mention} ❌ Failed to connect: {e}",
+                        )
                     return
 
             player.autoplay = True
@@ -424,6 +443,11 @@ class PlayCog(commands.Cog):
                     await interaction.followup.send("🎲 **Discovery mode activated!** Finding songs for you...", ephemeral=True)
                 except Exception:
                     pass
+            else:
+                await self._safe_channel_notice(
+                    interaction,
+                    f"{interaction.user.mention} 🎲 Discovery mode activated! Finding songs...",
+                )
 
 
 async def setup(bot: commands.Bot):

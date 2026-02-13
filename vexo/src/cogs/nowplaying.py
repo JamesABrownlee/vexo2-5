@@ -894,7 +894,20 @@ class NowPlayingCog(commands.Cog):
                 # Drop duplicate refreshes only if we still have a message to keep.
                 # If message lookup failed (deleted/missing), continue and recreate it.
                 if skip_duplicate_refresh and msg is not None:
-                    return
+                    stale_msg = msg
+                    try:
+                        msg_channel = getattr(msg, "channel", None) or channel
+                        if hasattr(msg_channel, "fetch_message"):
+                            await self._discord_call_with_backoff(
+                                player.guild_id,
+                                "verify_duplicate_now_playing_exists",
+                                lambda: msg_channel.fetch_message(msg.id),
+                            )
+                            return
+                    except Exception:
+                        msg = None
+                        if player.last_np_msg is stale_msg:
+                            player.last_np_msg = None
 
                 # If we want to bump the message to the bottom, delete it and re-send.
                 if repost and msg is not None:
@@ -952,11 +965,19 @@ class NowPlayingCog(commands.Cog):
                             lambda: channel.send(file=file, view=view),
                         )
                     else:
-                        msg = await self._discord_call_with_backoff(
-                            player.guild_id,
-                            "send_now_playing_loading_embed",
-                            lambda: channel.send(embed=loading_embed, view=view),
-                        )
+                        try:
+                            msg = await self._discord_call_with_backoff(
+                                player.guild_id,
+                                "send_now_playing_loading_embed",
+                                lambda: channel.send(embed=loading_embed, view=view),
+                            )
+                        except discord.HTTPException:
+                            # If components/view payload is rejected, still post base embed.
+                            msg = await self._discord_call_with_backoff(
+                                player.guild_id,
+                                "send_now_playing_loading_embed_no_view",
+                                lambda: channel.send(embed=loading_embed),
+                            )
 
                 player.last_np_msg = msg
                 self._np_last_video_sent[player.guild_id] = video_id
