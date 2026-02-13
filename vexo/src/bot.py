@@ -125,21 +125,22 @@ class MusicBot(commands.Bot):
         # Never allow tracing/logging to break Discord's interaction pipeline.
         try:
             if interaction and interaction.id:
-                self._log_interaction_start(interaction)
                 if interaction.type == discord.InteractionType.application_command:
                     data = interaction.data or {}
+                    cmd_name = str(data.get("name") or "").lower()
+
+                    # ACK first for potentially heavy commands to avoid 3s expiry.
+                    # Keep this ahead of all logging/serialization work.
+                    if cmd_name in {"play", "import"} and not interaction.response.is_done():
+                        await self._try_predefer(interaction, cmd_name)
+
+                self._log_interaction_start(interaction)
+                if interaction.type == discord.InteractionType.application_command:
                     opts = self._summarize_options(data.get("options"))
                     self._interaction_started[interaction.id] = {
                         "t0": time.perf_counter(),
                         "options": opts,
                     }
-
-                    # Early ACK for commands that can do heavier startup-time work.
-                    # Their handlers already defer/respond via followups, so pre-defer is safe.
-                    cmd_name = str(data.get("name") or "").lower()
-                    if cmd_name in {"play", "import"} and not interaction.response.is_done():
-                        # Do not await network IO in on_interaction; it can delay app command dispatch.
-                        asyncio.create_task(self._try_predefer(interaction, cmd_name))
         except Exception as e:
             try:
                 log.exception_cat(
