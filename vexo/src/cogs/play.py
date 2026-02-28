@@ -47,6 +47,23 @@ class PlayCog(commands.Cog):
         except Exception:
             return
 
+    async def _safe_toast(self, interaction: discord.Interaction, content: str, *, delete_after: float = 5.0) -> None:
+        try:
+            user = getattr(interaction, "user", None)
+            display = getattr(user, "display_name", None) or getattr(user, "name", None) or "Unknown"
+            embed = discord.Embed(description=content, color=discord.Color.blurple())
+            embed.set_footer(text=f"Action by {display}")
+
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, delete_after=delete_after)
+            else:
+                await interaction.response.send_message(embed=embed, delete_after=delete_after)
+        except discord.NotFound:
+            return
+        except Exception as e:
+            log.exception_cat(Category.SYSTEM, "Failed to send play toast", error=str(e))
+            return
+
     @play_group.command(name="song", description="Search and play a specific song")
     @app_commands.describe(query="Song name or search query")
     async def play_song(self, interaction: discord.Interaction, query: str):
@@ -228,15 +245,8 @@ class PlayCog(commands.Cog):
 
             await music.ensure_play_loop(player, reason="play_song")
 
-            embed = discord.Embed(
-                title="🎵 Added to Queue",
-                description=f"**{track.title}**\nby {track.artist}",
-                color=discord.Color.green(),
-            )
-            embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-
             try:
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                await self._safe_toast(interaction, f"Added to queue: **{track.title}** by {track.artist}")
             except discord.NotFound:
                 pass
 
@@ -356,14 +366,10 @@ class PlayCog(commands.Cog):
 
             await music.ensure_play_loop(player, reason="play_artist")
 
-            embed = discord.Embed(
-                title="👩‍🎤 Artist Radio Queued",
-                description=f"Added **{queued_count}** top tracks by **{sp_artist.name}**\nAlso boosted your preference for this artist!",
-                color=discord.Color.blue(),
+            await self._safe_toast(
+                interaction,
+                f"Queued **{queued_count}** tracks by **{sp_artist.name}** and boosted your preference",
             )
-            embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-
-            await interaction.followup.send(embed=embed, ephemeral=True)
 
     @play_group.command(name="any", description="Start playing with discovery mode")
     async def play_any(self, interaction: discord.Interaction):
@@ -443,7 +449,7 @@ class PlayCog(commands.Cog):
 
             if can_respond:
                 try:
-                    await interaction.followup.send("🎲 **Discovery mode activated!** Finding songs for you...", ephemeral=True)
+                    await self._safe_toast(interaction, "Discovery mode activated. Finding songs...")
                 except Exception:
                     pass
             else:
