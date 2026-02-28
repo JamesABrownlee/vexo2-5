@@ -14,6 +14,9 @@ import discord
 from discord.ext import commands
 
 from src.services.youtube import YouTubeService, YTTrack, StreamInfo
+from src.services.enrichment_worker import EnrichmentWorker
+from src.services.metadata_enricher import MetadataEnricher
+from src.services.stream_resolver import StreamResolverWorker
 from src.database.crud import SongCRUD, UserCRUD, PlaybackCRUD, ReactionCRUD, GuildCRUD
 from src.utils.logging import get_logger, Category, Event
 
@@ -216,7 +219,10 @@ class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.players: dict[int, GuildPlayer] = {}
-        self.youtube = YouTubeService()
+        self.youtube = getattr(bot, "youtube", None) or YouTubeService()
+        self.metadata_enricher = MetadataEnricher()
+        self.enrichment = EnrichmentWorker(self.youtube, concurrency=2, metadata_enricher=self.metadata_enricher)
+        self.stream_resolver = StreamResolverWorker(self.youtube, concurrency=2)
         self._idle_check_task: asyncio.Task | None = None
         self._radio_presenter_task: asyncio.Task | None = None
         self._radio_presenter_enabled: bool | None = None  # unknown until checked
@@ -259,6 +265,15 @@ class MusicCog(commands.Cog):
     async def cog_load(self):
         """Called when the cog is loaded."""
         self._start_background_tasks(reason="cog_load")
+        await self.enrichment.start()
+        await self.stream_resolver.start()
+        if hasattr(self.bot, "discovery") and self.bot.discovery:
+            try:
+                set_worker = getattr(self.bot.discovery, "set_enrichment_worker", None)
+                if callable(set_worker):
+                    set_worker(self.enrichment)
+            except Exception:
+                pass
 
         log.event(Category.SYSTEM, Event.COG_LOADED, cog="music")
 
@@ -273,6 +288,8 @@ class MusicCog(commands.Cog):
             self._idle_check_task.cancel()
         if self._radio_presenter_task:
             self._radio_presenter_task.cancel()
+        await self.enrichment.stop()
+        await self.stream_resolver.stop()
         await self._stop_obs_relay()
         self._background_tasks_started = False
 
@@ -594,7 +611,7 @@ class MusicCog(commands.Cog):
         """Resolve stream URL for an item with timeout."""
         try:
             return await asyncio.wait_for(
-                self.youtube.get_stream_url(item.video_id),
+                self.stream_resolver.get_stream_url(item.video_id, timeout_s=self.STREAM_FETCH_TIMEOUT),
                 timeout=self.STREAM_FETCH_TIMEOUT
             )
         except asyncio.TimeoutError:
@@ -1084,7 +1101,7 @@ class MusicCog(commands.Cog):
                 # Also prefetch stream URL for zero-delay playback
                 try:
                     stream_info = await asyncio.wait_for(
-                        self.youtube.get_stream_url(item.video_id),
+                        self.stream_resolver.get_stream_url(item.video_id, timeout_s=self.STREAM_FETCH_TIMEOUT),
                         timeout=self.STREAM_FETCH_TIMEOUT
                     )
                     if stream_info:
@@ -1132,7 +1149,7 @@ class MusicCog(commands.Cog):
         
         # Direct search fallback - search for popular songs
         log.event(Category.DISCOVERY, "fallback_direct_search")
-        results = await self.youtube.search("top hits 2024 popular", filter_type="songs", limit=20)
+        results = await self.enrichment.search_tracks("top hits 2024 popular", filter_type="songs", limit=20, timeout_s=8.0)
         
         if results:
             track = random.choice(results)

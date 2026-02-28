@@ -313,8 +313,8 @@ class PlaybackCRUD:
         """Log a track being played."""
         cursor = await self.db.execute(
             """INSERT INTO playback_history 
-               (session_id, song_id, discovery_source, discovery_reason, for_user_id)
-               VALUES (?, ?, ?, ?, ?)""",
+               (session_id, song_id, discovery_source, discovery_reason, for_user_id, played_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))""",
             (session_id, song_id, discovery_source, discovery_reason, for_user_id)
         )
         return cursor.lastrowid
@@ -347,10 +347,14 @@ class PlaybackCRUD:
             JOIN playback_sessions ps ON ph.session_id = ps.id
             JOIN songs s ON ph.song_id = s.id
             WHERE ps.guild_id = ? 
-            AND ph.played_at > datetime('now', ?)
+            AND (
+                (typeof(ph.played_at) = 'integer' AND ph.played_at > (strftime('%s','now') - ?))
+                OR
+                (typeof(ph.played_at) != 'integer' AND datetime(ph.played_at) > datetime('now', ?))
+            )
         """
         modifier = f"-{seconds} seconds"
-        rows = await self.db.fetch_all(query, (guild_id, modifier))
+        rows = await self.db.fetch_all(query, (guild_id, seconds, modifier))
         return [row["canonical_yt_id"] for row in rows]
 
 

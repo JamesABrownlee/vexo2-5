@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from src.services.youtube import YouTubeService, YTTrack
+from src.services.enrichment_worker import EnrichmentWorker
 from src.services.spotify import SpotifyService
 from src.services.normalizer import SongNormalizer
 
@@ -87,6 +88,7 @@ class DiscoveryEngine:
         preference_crud: "PreferenceCRUD",
         playback_crud: "PlaybackCRUD",
         reaction_crud: "ReactionCRUD",
+        enrichment_worker: EnrichmentWorker | None = None,
     ):
         self.youtube = youtube
         self.spotify = spotify
@@ -95,6 +97,10 @@ class DiscoveryEngine:
         self.playback = playback_crud
         self.reactions = reaction_crud
         self.turn_tracker = TurnTracker()
+        self.enrichment = enrichment_worker
+
+    def set_enrichment_worker(self, worker: EnrichmentWorker | None) -> None:
+        self.enrichment = worker
 
     @staticmethod
     def _song_key(title: str | None, artist: str | None) -> str:
@@ -168,9 +174,26 @@ class DiscoveryEngine:
         if track:
             # Avoid missing duration at all costs: fetch if missing
             if track.duration_seconds is None:
-                details = await self.youtube.get_track_info(track.video_id)
+                if self.enrichment:
+                    details = await self.enrichment.get_track_info(track.video_id, timeout_s=3.0)
+                else:
+                    details = await self.youtube.get_track_info(track.video_id)
                 if details and details.duration_seconds:
                     track.duration_seconds = details.duration_seconds
+                if details and details.year and not track.year:
+                    track.year = details.year
+
+            # Optional metadata enrichment (genres/year) if enabled
+            genre = None
+            year = track.year
+            if self.enrichment:
+                meta = await self.enrichment.enrich_metadata(track.artist, track.title, timeout_s=5.0)
+                if meta:
+                    genres = meta.get("genres") or []
+                    if genres:
+                        genre = genres[0]
+                    if meta.get("year") and not year:
+                        year = meta.get("year")
 
             return DiscoveredSong(
                 video_id=track.video_id,
@@ -180,7 +203,8 @@ class DiscoveryEngine:
                 reason=self._generate_reason(strategy, track),
                 for_user_id=turn_user_id,
                 duration_seconds=track.duration_seconds,
-                year=track.year
+                genre=genre,
+                year=year
             )
         
         return None
@@ -251,7 +275,10 @@ class DiscoveryEngine:
         seed_song = random.choice(liked)
         
         # Get watch playlist (related songs)
-        related = await self.youtube.get_watch_playlist(seed_song["canonical_yt_id"], limit=20)
+        if self.enrichment:
+            related = await self.enrichment.get_watch_playlist(seed_song["canonical_yt_id"], limit=20, timeout_s=8.0)
+        else:
+            related = await self.youtube.get_watch_playlist(seed_song["canonical_yt_id"], limit=20)
         
         # Filter out recent songs and same artist
         candidates = [
@@ -316,7 +343,10 @@ class DiscoveryEngine:
         
         if not playlists:
             # Fallback: direct search for popular songs
-            results = await self.youtube.search("top hits 2024", filter_type="songs", limit=20)
+            if self.enrichment:
+                results = await self.enrichment.search_tracks("top hits 2024", filter_type="songs", limit=20, timeout_s=8.0)
+            else:
+                results = await self.youtube.search("top hits 2024", filter_type="songs", limit=20)
             candidates = [
                 t for t in results
                 if t.video_id not in recent_yt_ids

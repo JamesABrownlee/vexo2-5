@@ -58,6 +58,18 @@ docker-compose logs -f
 
 The web dashboard is available at `http://localhost:8080` (localhost only, no auth).
 
+## 📦 GitHub Container Registry Images
+
+Prebuilt multi-arch images are published on each push to `main` and tagged `latest`.
+
+```bash
+# Bot
+docker pull ghcr.io/<owner>/<repo>:latest
+
+# Dashboard
+docker pull ghcr.io/<owner>/<repo>-dashboard:latest
+```
+
 ## 📋 Commands
 
 ### Music

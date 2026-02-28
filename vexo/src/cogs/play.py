@@ -109,7 +109,10 @@ class PlayCog(commands.Cog):
                         pass
                     return
 
-            results = await music.youtube.search(query, filter_type="songs", limit=1)
+            if hasattr(music, "enrichment"):
+                results = await music.enrichment.search_tracks(query, filter_type="songs", limit=1, timeout_s=8.0)
+            else:
+                results = await music.youtube.search(query, filter_type="songs", limit=1)
             if not results:
                 try:
                     await interaction.followup.send(f"❌ No results found for: `{query}`", ephemeral=True)
