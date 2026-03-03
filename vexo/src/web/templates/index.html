@@ -637,6 +637,26 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-label">AI-Powered Discovery <span style="background: linear-gradient(135deg, #8B5CF6, #EC4899); color: white; font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: bold; margin-left: 6px;">BETA</span></span>
+                        <span class="setting-description">Use AI to suggest songs based on user preferences (requires Ollama)</span>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="setting-ai-discovery-enabled">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-label">AI Recommendations on Join</span>
+                        <span class="setting-description">Queue personalized AI suggestions when users join the voice channel</span>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="setting-ai-discovery-on-join">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
                 <button class="btn-primary" onclick="saveServerSettings()">Save Settings</button>
             </div>
         </div>

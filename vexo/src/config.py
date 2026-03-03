@@ -39,6 +39,11 @@ class Config:
     # Optional: OBS audio relay integration
     OBS_AUDIO_ENABLED: bool
     OBS_AUDIO_BITRATE_KBPS: int
+    
+    # Optional: Ollama AI for discovery
+    OLLAMA_BASE_URL: str
+    OLLAMA_MODEL: str
+    OLLAMA_TOKEN: str | None
 
     # Optional: OAuth scaffolding for dashboard auth
     DISCORD_OAUTH_CLIENT_ID: str | None
@@ -84,6 +89,9 @@ class Config:
             RADIO_PRESENTER_VOICE=os.getenv("RADIO_PRESENTER_VOICE"),
             OBS_AUDIO_ENABLED=_bool_env("OBS_AUDIO_ENABLED", False),
             OBS_AUDIO_BITRATE_KBPS=max(32, int(os.getenv("OBS_AUDIO_BITRATE_KBPS", "192"))),
+            OLLAMA_BASE_URL=os.getenv("OLLAMA_BASE_URL", "https://ollama.plingindigo.org"),
+            OLLAMA_MODEL=os.getenv("OLLAMA_MODEL", "llama3"),
+            OLLAMA_TOKEN=os.getenv("OLLAMA_TOKEN"),
             DISCORD_OAUTH_CLIENT_ID=os.getenv("DISCORD_OAUTH_CLIENT_ID"),
             DISCORD_OAUTH_CLIENT_SECRET=os.getenv("DISCORD_OAUTH_CLIENT_SECRET"),
             DISCORD_OAUTH_REDIRECT_URI=os.getenv("DISCORD_OAUTH_REDIRECT_URI"),

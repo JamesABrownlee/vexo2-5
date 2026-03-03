@@ -290,10 +290,16 @@ class MusicBot(commands.Bot):
         from src.services.normalizer import SongNormalizer
         from src.services.discovery import DiscoveryEngine
         from src.services.preferences import PreferenceManager
+        from src.services.ollama_client import OllamaClient
         
         self.youtube = YouTubeService(config.YTDL_COOKIES_PATH, config.YTDL_PO_TOKEN)
         self.spotify = SpotifyService(config.SPOTIFY_CLIENT_ID, config.SPOTIFY_CLIENT_SECRET)
         self.normalizer = SongNormalizer(self.youtube)
+        self.ollama = OllamaClient(
+            base_url=config.OLLAMA_BASE_URL,
+            model=config.OLLAMA_MODEL,
+            bearer_token=config.OLLAMA_TOKEN
+        )
         
         
         # Initialize CRUD helpers

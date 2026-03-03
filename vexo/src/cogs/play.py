@@ -458,6 +458,216 @@ class PlayCog(commands.Cog):
                     f"{interaction.user.mention} 🎲 Discovery mode activated! Finding songs...",
                 )
 
+    @play_group.command(name="ai", description="Play AI-suggested tracks with dynamic recommendations")
+    @app_commands.describe(seed_query="Song to use as a seed for AI recommendations")
+    async def play_ai(self, interaction: discord.Interaction, seed_query: str):
+        """Enable AI play mode: seed track plays, AI suggests next + alternatives shown in Now Playing."""
+        music = self.music
+        if not music:
+            await interaction.response.send_message("❌ Music system is not loaded.", ephemeral=True)
+            return
+
+        if not self._was_predeferred(interaction):
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+            except discord.NotFound:
+                log.warning_cat(Category.SYSTEM, "Interaction expired/unknown (404) in play_ai", seed_query=seed_query)
+                return
+            except Exception as e:
+                log.exception_cat(Category.SYSTEM, "Failed to defer interaction in play_ai", error=str(e), seed_query=seed_query)
+                return
+
+        cmd_t0 = time.perf_counter()
+        with log.span(
+            Category.SYSTEM,
+            "command_play_ai",
+            module=__name__,
+            cog=type(self).__name__,
+            command="/play ai",
+            guild_id=interaction.guild_id,
+            channel_id=getattr(interaction.channel, "id", None),
+            user_id=getattr(interaction.user, "id", None),
+            seed_query=seed_query,
+        ):
+
+            if not interaction.user.voice:
+                try:
+                    await interaction.followup.send("❌ You need to be in a voice channel!", ephemeral=True)
+                except discord.NotFound:
+                    pass
+                return
+
+            voice_channel = interaction.user.voice.channel
+            player = music.get_player(interaction.guild_id)
+            player.text_channel_id = interaction.channel_id
+
+            # Connect to voice channel if not already
+            if not player.voice_client or not player.voice_client.is_connected():
+                try:
+                    player.voice_client = await voice_channel.connect(self_deaf=True, timeout=20.0)
+                    log.event(Category.VOICE, Event.VOICE_CONNECTED, channel=voice_channel.name, guild=interaction.guild.name)
+                    
+                    if not player.is_playing and not player.queue.empty():
+                        await music.ensure_play_loop(player, reason="reconnection")
+                except Exception as e:
+                    try:
+                        await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
+                    except discord.NotFound:
+                        pass
+                    return
+
+            # Check if AI discovery is available
+            ollama_client = getattr(self.bot, "ollama", None)
+            if not ollama_client:
+                try:
+                    await interaction.followup.send("❌ AI is not configured on this bot.", ephemeral=True)
+                except discord.NotFound:
+                    pass
+                return
+
+            ai_available = await ollama_client.health_check()
+            if not ai_available:
+                try:
+                    await interaction.followup.send("❌ AI is currently unavailable. Please try again later.", ephemeral=True)
+                except discord.NotFound:
+                    pass
+                return
+
+            # Check guild settings for AI discovery enabled
+            if hasattr(self.bot, "db") and self.bot.db:
+                try:
+                    guild_crud = GuildCRUD(self.bot.db)
+                    ai_enabled_setting = await guild_crud.get_setting(interaction.guild_id, "ai_discovery_enabled")
+                    log.info_cat(
+                        Category.SYSTEM,
+                        "AI discovery setting check",
+                        guild_id=interaction.guild_id,
+                        setting_value=ai_enabled_setting,
+                        setting_type=type(ai_enabled_setting).__name__
+                    )
+                    if not ai_enabled_setting:
+                        try:
+                            await interaction.followup.send(
+                                "❌ AI discovery is not enabled for this server. Enable it in settings first.",
+                                ephemeral=True
+                            )
+                        except discord.NotFound:
+                            pass
+                        log.info_cat(Category.SYSTEM, "AI discovery check failed", setting_value=ai_enabled_setting)
+                        return
+                except Exception as e:
+                    log.warning_cat(Category.DATABASE, "Failed to check AI settings", error=str(e))
+
+            # Resolve seed track
+            if hasattr(music, "enrichment"):
+                results = await music.enrichment.search_tracks(seed_query, filter_type="songs", limit=1, timeout_s=8.0)
+            else:
+                results = await music.youtube.search(seed_query, filter_type="songs", limit=1)
+            
+            if not results:
+                try:
+                    await interaction.followup.send(f"❌ No results found for: `{seed_query}`", ephemeral=True)
+                except discord.NotFound:
+                    pass
+                return
+
+            seed_track = results[0]
+
+            def _coerce_duration_seconds(value) -> int | None:
+                if value is None:
+                    return None
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, float):
+                    return int(value)
+                if isinstance(value, str):
+                    s = value.strip()
+                    if not s:
+                        return None
+                    if ":" in s:
+                        parts = s.split(":")
+                        try:
+                            nums = [int(p) for p in parts]
+                        except ValueError:
+                            return None
+                        if len(nums) == 2:
+                            m, sec = nums
+                            return m * 60 + sec
+                        if len(nums) == 3:
+                            h, m, sec = nums
+                            return h * 3600 + m * 60 + sec
+                        return None
+                    try:
+                        return int(float(s))
+                    except ValueError:
+                        return None
+                return None
+
+            duration_seconds = _coerce_duration_seconds(getattr(seed_track, "duration_seconds", None))
+
+            # Queue seed track
+            song_db_id = None
+            if hasattr(self.bot, "db") and self.bot.db:
+                try:
+                    user_crud = UserCRUD(self.bot.db)
+                    song_crud = SongCRUD(self.bot.db)
+
+                    await user_crud.get_or_create(interaction.user.id, interaction.user.name)
+
+                    song = await song_crud.get_or_create_by_yt_id(
+                        canonical_yt_id=seed_track.video_id,
+                        title=seed_track.title,
+                        artist_name=seed_track.artist,
+                        duration_seconds=duration_seconds,
+                        release_year=seed_track.year,
+                        album=seed_track.album,
+                    )
+                    song_db_id = song["id"]
+
+                    lib_crud = LibraryCRUD(self.bot.db)
+                    await lib_crud.add_to_library(interaction.user.id, song_db_id, "ai_play_seed")
+                except Exception as e:
+                    log.error_cat(Category.DATABASE, "Failed to persist AI seed song", error=str(e))
+
+            seed_item = QueueItem(
+                video_id=seed_track.video_id,
+                title=seed_track.title,
+                artist=seed_track.artist,
+                requester_id=interaction.user.id,
+                discovery_source="user_request",
+                song_db_id=song_db_id,
+                duration_seconds=duration_seconds,
+                year=seed_track.year,
+            )
+            player.queue.put_nowait(seed_item)
+            player.last_activity = datetime.now(UTC)
+
+            log.event(Category.QUEUE, Event.TRACK_QUEUED, title=seed_track.title, artist=seed_track.artist, source="ai_play_seed")
+
+            # Enable AI mode
+            player.ai_mode_enabled = True
+            player.ai_seed_track_id = None  # Will be set when track starts
+            player.ai_autoplay_next = None
+            player.ai_alternatives = []
+            player.ai_generated_at = None
+            
+            # Cancel any pending AI generation
+            if player._ai_generation_task and not player._ai_generation_task.done():
+                player._ai_generation_task.cancel()
+            
+            # Start playback
+            await music.ensure_play_loop(player, reason="play_ai")
+
+            try:
+                await self._safe_toast(
+                    interaction,
+                    f"🤖 **AI Mode Enabled** — Now playing: **{seed_track.title}** by {seed_track.artist}"
+                )
+            except discord.NotFound:
+                pass
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PlayCog(bot))

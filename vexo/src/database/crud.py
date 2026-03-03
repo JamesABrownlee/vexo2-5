@@ -478,6 +478,77 @@ class ReactionCRUD:
                LIMIT ?""",
             (user_id, limit)
         )
+    
+    async def get_disliked_songs(self, user_id: int, limit: int = 100) -> list[dict]:
+        """Get user's disliked songs."""
+        return await self.db.fetch_all(
+            """SELECT s.* FROM songs s
+               JOIN song_reactions sr ON s.id = sr.song_id
+               WHERE sr.user_id = ? AND sr.reaction IN ('dislike', 'hate')
+               ORDER BY sr.created_at DESC
+               LIMIT ?""",
+            (user_id, limit)
+        )
+    
+    async def get_disliked_songs_for_users(
+        self,
+        user_ids: list[int],
+        limit_per_user: int | None = 100
+    ) -> dict[int, list[dict]]:
+        """
+        Get disliked songs for multiple users in one efficient query.
+        
+        Args:
+            user_ids: List of user IDs to fetch dislikes for
+            limit_per_user: Optional limit per user (None = no limit)
+            
+        Returns:
+            Dict mapping user_id -> list of disliked song dicts
+        """
+        if not user_ids:
+            return {}
+        
+        # Create placeholders for the IN clause
+        placeholders = ",".join("?" * len(user_ids))
+        
+        # If limit_per_user is set, we'll need to use window functions
+        if limit_per_user:
+            # SQLite 3.25+ supports window functions
+            query = f"""
+                SELECT user_id, s.* FROM (
+                    SELECT sr.user_id, sr.song_id, sr.created_at,
+                           ROW_NUMBER() OVER (PARTITION BY sr.user_id ORDER BY sr.created_at DESC) as rn
+                    FROM song_reactions sr
+                    WHERE sr.user_id IN ({placeholders})
+                      AND sr.reaction IN ('dislike', 'hate')
+                ) ranked
+                JOIN songs s ON s.id = ranked.song_id
+                WHERE ranked.rn <= ?
+                ORDER BY ranked.user_id, ranked.created_at DESC
+            """
+            params = tuple(user_ids) + (limit_per_user,)
+        else:
+            query = f"""
+                SELECT sr.user_id, s.*
+                FROM song_reactions sr
+                JOIN songs s ON s.id = sr.song_id
+                WHERE sr.user_id IN ({placeholders})
+                  AND sr.reaction IN ('dislike', 'hate')
+                ORDER BY sr.user_id, sr.created_at DESC
+            """
+            params = tuple(user_ids)
+        
+        rows = await self.db.fetch_all(query, params)
+        
+        # Group by user_id
+        result: dict[int, list[dict]] = {uid: [] for uid in user_ids}
+        for row in rows:
+            user_id = row["user_id"]
+            # Remove user_id from the song dict
+            song_data = {k: v for k, v in row.items() if k != "user_id"}
+            result[user_id].append(song_data)
+        
+        return result
 
 
 class SystemCRUD:

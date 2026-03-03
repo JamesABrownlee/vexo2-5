@@ -108,10 +108,19 @@ class GuildPlayer:
     _consecutive_failures: int = 0  # Track consecutive failures for auto-recovery
     _last_health_check: datetime = field(default_factory=lambda: datetime.now(UTC))
     _np_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _join_debounce: dict[int, datetime] = field(default_factory=dict)  # Track user join times for AI discovery
+    _play_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _current_source: discord.AudioSource | None = None
     _current_stream_info: StreamInfo | None = None
     _play_task: asyncio.Task | None = None
-    _play_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    
+    # AI Play Mode state
+    ai_mode_enabled: bool = False
+    ai_seed_track_id: str | None = None  # video_id of track used as seed
+    ai_autoplay_next: QueueItem | None = None  # Resolved next track from AI
+    ai_alternatives: list[QueueItem] = field(default_factory=list)  # Resolved alternative tracks
+    ai_generated_at: datetime | None = None  # Timestamp of last AI generation
+    _ai_generation_task: asyncio.Task | None = None  # Current AI generation task
 
 
 class MusicCog(commands.Cog):
@@ -168,12 +177,24 @@ class MusicCog(commands.Cog):
         }
     
     async def _get_next_item(self, player: GuildPlayer) -> QueueItem | None:
-        """Get next item from queue or discovery."""
+        """Get next item from queue or discovery (prioritizes AI autoplay if enabled)."""
         if not player.queue.empty():
             return player.queue.get_nowait()
             
         if not player.autoplay:
             return None
+        
+        # AI Mode: Use AI autoplay next if available
+        if player.ai_mode_enabled and player.ai_autoplay_next:
+            item = player.ai_autoplay_next
+            player.ai_autoplay_next = None  # Clear after use
+            log.info_cat(
+                Category.DISCOVERY,
+                "Using AI autoplay next track",
+                guild_id=player.guild_id,
+                title=item.title
+            )
+            return item
             
         # Use prefetched discovery song if available
         if player._next_discovery:
@@ -932,6 +953,18 @@ class MusicCog(commands.Cog):
                         )
                     await self._notify_now_playing(player)
                     
+                    # AI Mode: Generate suggestions for current track
+                    if player.ai_mode_enabled and item.video_id:
+                        # Cancel any pending AI generation
+                        if player._ai_generation_task and not player._ai_generation_task.done():
+                            player._ai_generation_task.cancel()
+                        
+                        # Set seed track ID and start new generation
+                        player.ai_seed_track_id = item.video_id
+                        player._ai_generation_task = asyncio.create_task(
+                            self._generate_ai_suggestions_for_track(player, item)
+                        )
+                    
                     max_wait = (item.duration_seconds or 600) + 60
                     try:
                         await asyncio.wait_for(play_complete.wait(), timeout=max_wait)
@@ -1007,7 +1040,7 @@ class MusicCog(commands.Cog):
             player.current = None
     
     async def _get_discovery_song(self, player: GuildPlayer) -> QueueItem | None:
-        """Get next song from discovery engine."""
+        """Get next song from discovery engine (AI-preferred if enabled)."""
         # Get voice channel members
         if not player.voice_client or not player.voice_client.channel:
             return None
@@ -1016,7 +1049,31 @@ class MusicCog(commands.Cog):
         if not voice_members:
             return None
         
-        # Try discovery engine first
+        # Try AI discovery first if enabled
+        if hasattr(self.bot, "db") and self.bot.db:
+            try:
+                guild_crud = GuildCRUD(self.bot.db)
+                ai_enabled = await guild_crud.get_setting(player.guild_id, "ai_discovery_enabled")
+                
+                if ai_enabled:
+                    ollama_client = getattr(self.bot, "ollama", None)
+                    if ollama_client:
+                        ai_available = await ollama_client.health_check()
+                        if ai_available:
+                            # Try AI discovery
+                            ai_item = await self._get_ai_discovery_song(player, voice_members)
+                            if ai_item:
+                                return ai_item
+                            # If AI returned None, fall through to traditional discovery
+                            log.debug_cat(
+                                Category.DISCOVERY,
+                                "AI discovery returned no results, falling back to traditional discovery",
+                                guild_id=player.guild_id
+                            )
+            except Exception as e:
+                log.error_cat(Category.DISCOVERY, "AI discovery check failed", error=str(e), guild_id=player.guild_id)
+        
+        # Try traditional discovery engine
         if hasattr(self.bot, "discovery") and self.bot.discovery:
             try:
                 # Get Cooldown Setting
@@ -1059,6 +1116,201 @@ class MusicCog(commands.Cog):
         # Fallback: Get random track from charts
         log.event(Category.DISCOVERY, "fallback_to_charts", guild_id=player.guild_id)
         return await self._get_chart_fallback()
+    
+    async def _get_ai_discovery_song(self, player: GuildPlayer, voice_members: list[int]) -> QueueItem | None:
+        """
+        Get next song using AI discovery based on collective user preferences.
+        
+        Uses the "democratic" user selection from voice members, fetches their likes,
+        and asks AI for suggestions.
+        """
+        if not voice_members or not hasattr(self.bot, "db") or not self.bot.db:
+            return None
+        
+        ollama_client = getattr(self.bot, "ollama", None)
+        if not ollama_client:
+            return None
+        
+        try:
+            from src.database.crud import ReactionCRUD, PlaybackCRUD, SongCRUD
+            reaction_crud = ReactionCRUD(self.bot.db)
+            playback_crud = PlaybackCRUD(self.bot.db)
+            song_crud = SongCRUD(self.bot.db)
+            guild_crud = GuildCRUD(self.bot.db)
+            
+            # Pick a "democratic" user (rotate or choose based on existing logic)
+            # For simplicity, pick the first user or use existing democratic logic
+            # If the discovery engine has a user selection method, reuse it
+            target_user_id = voice_members[0]
+            if hasattr(self.bot, "discovery") and self.bot.discovery:
+                try:
+                    # Try to use discovery engine's democratic user selection
+                    demo_user = await self.bot.discovery._pick_democratic_user(player.guild_id, voice_members)
+                    if demo_user:
+                        target_user_id = demo_user
+                except Exception:
+                    pass
+            
+            # Get target user's likes
+            liked_tracks = await reaction_crud.get_liked_songs(target_user_id, limit=20)
+            
+            # Get dislikes from all VC members (hard veto)
+            all_dislikes_map = await reaction_crud.get_disliked_songs_for_users(voice_members, limit_per_user=50)
+            all_dislikes = []
+            for dislikes_list in all_dislikes_map.values():
+                all_dislikes.extend(dislikes_list)
+            
+            # Get recently played tracks
+            recent = await playback_crud.get_recent_playback(player.guild_id, limit=100)
+            
+            # Build exclude list
+            exclude_list = []
+            seen_ids = set()
+            
+            for track in all_dislikes:
+                track_id = track.get("id") or track.get("canonical_yt_id")
+                if track_id and track_id not in seen_ids:
+                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
+                    seen_ids.add(track_id)
+            
+            for track in recent:
+                track_id = track.get("song_id") or track.get("canonical_yt_id")
+                if track_id and track_id not in seen_ids:
+                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
+                    seen_ids.add(track_id)
+            
+            # Use current or last track as seed if available
+            seed_track = None
+            if player.current:
+                seed_track = {
+                    "title": player.current.title,
+                    "artist": player.current.artist,
+                    "genre": player.current.genre,
+                    "year": player.current.year,
+                }
+            
+            # Get AI suggestions
+            if seed_track and liked_tracks:
+                # Use hybrid: seed + user preferences
+                suggestions = await ollama_client.suggest_for_user(
+                    liked_tracks=[{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks],
+                    disliked_tracks=[],  # Already in exclude_list
+                    group_disliked_tracks=[],  # Already in exclude_list
+                    exclude_list=exclude_list,
+                    n_candidates=20
+                )
+            elif seed_track:
+                # Use seed-based
+                suggestions = await ollama_client.suggest_from_seed(
+                    seed_track=seed_track,
+                    exclude_list=exclude_list,
+                    n_candidates=20
+                )
+            elif liked_tracks:
+                # Use user preferences only
+                suggestions = await ollama_client.suggest_for_user(
+                    liked_tracks=[{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks],
+                    disliked_tracks=[],
+                    group_disliked_tracks=[],
+                    exclude_list=exclude_list,
+                    n_candidates=20
+                )
+            else:
+                # No context available
+                return None
+            
+            if not suggestions:
+                return None
+            
+            # Get max duration setting
+            max_seconds = 0
+            max_duration = await guild_crud.get_setting(player.guild_id, "max_song_duration")
+            if max_duration:
+                try:
+                    max_seconds = int(max_duration) * 60
+                except (ValueError, TypeError):
+                    pass
+            
+            # Try to resolve suggestions
+            for suggestion in suggestions:
+                search_query = f"{suggestion.title} {suggestion.artist}"
+                try:
+                    if hasattr(self, "enrichment"):
+                        results = await self.enrichment.search_tracks(search_query, filter_type="songs", limit=1, timeout_s=5.0)
+                    else:
+                        results = await self.youtube.search(search_query, filter_type="songs", limit=1)
+                    
+                    if not results:
+                        continue
+                    
+                    track = results[0]
+                    
+                    # Check if already excluded
+                    if track.video_id in seen_ids:
+                        continue
+                    
+                    # Check duration
+                    duration_seconds = None
+                    if hasattr(track, "duration_seconds"):
+                        try:
+                            duration_seconds = int(track.duration_seconds) if track.duration_seconds else None
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    if max_seconds > 0 and duration_seconds and duration_seconds > max_seconds:
+                        continue
+                    
+                    # Persist to DB
+                    song_db_id = None
+                    try:
+                        song = await song_crud.get_or_create_by_yt_id(
+                            canonical_yt_id=track.video_id,
+                            title=track.title,
+                            artist_name=track.artist,
+                            duration_seconds=duration_seconds,
+                            release_year=getattr(track, "year", None),
+                            album=getattr(track, "album", None),
+                        )
+                        song_db_id = song["id"]
+                    except Exception as e:
+                        log.error_cat(Category.DATABASE, "Failed to persist AI autoplay suggestion", error=str(e))
+                    
+                    # Return the first valid track
+                    log.info_cat(
+                        Category.DISCOVERY,
+                        "AI discovery found track",
+                        title=track.title,
+                        artist=track.artist,
+                        for_user_id=target_user_id
+                    )
+                    
+                    return QueueItem(
+                        video_id=track.video_id,
+                        title=track.title,
+                        artist=track.artist,
+                        requester_id=None,
+                        discovery_source="ai_autoplay",
+                        discovery_reason=suggestion.reason,
+                        for_user_id=target_user_id,
+                        song_db_id=song_db_id,
+                        duration_seconds=duration_seconds,
+                        year=getattr(track, "year", None),
+                    )
+                
+                except Exception as e:
+                    log.error_cat(Category.SYSTEM, "Failed to resolve AI autoplay suggestion", error=str(e), query=search_query)
+            
+            # No valid suggestions found
+            return None
+        
+        except Exception as e:
+            log.exception(
+                "AI autoplay discovery failed",
+                category=Category.API,
+                guild_id=player.guild_id,
+                error=str(e)
+            )
+            return None
     
     async def _get_discovery_song_with_retry(self, player: GuildPlayer, max_seconds: int = 0) -> QueueItem | None:
         """Get discovery song with retry logic for duration limits."""
@@ -1166,6 +1418,156 @@ class MusicCog(commands.Cog):
         
         log.warning_cat(Category.DISCOVERY, "No chart tracks found via any method")
         return None
+    
+    async def _generate_ai_suggestions_for_track(self, player: GuildPlayer, track: QueueItem) -> None:
+        """
+        Generate AI suggestions for the current playing track and update player state.
+        
+        This is called when a track starts playing in AI mode.
+        Generates 1 autoplay_next + 5 alternatives and resolves them.
+        """
+        if not player.ai_mode_enabled:
+            return
+        
+        ollama_client = getattr(self.bot, "ollama", None)
+        if not ollama_client:
+            return
+        
+        # Check if AI is available
+        ai_available = await ollama_client.health_check()
+        if not ai_available:
+            log.warning_cat(Category.API, "AI unavailable, skipping generation", guild_id=player.guild_id)
+            return
+        
+        try:
+            # Build exclude list (recent + dislikes)
+            exclude_list = []
+            if hasattr(self.bot, "db") and self.bot.db:
+                try:
+                    from src.database.crud import PlaybackCRUD, ReactionCRUD
+                    playback_crud = PlaybackCRUD(self.bot.db)
+                    reaction_crud = ReactionCRUD(self.bot.db)
+                    
+                    # Get recent playback
+                    recent = await playback_crud.get_recent_playback(player.guild_id, limit=100)
+                    for r in recent:
+                        exclude_list.append({"title": r.get("title", ""), "artist": r.get("artist", "")})
+                    
+                    # Get dislikes from VC members
+                    if player.voice_client and player.voice_client.channel:
+                        voice_members = [m.id for m in player.voice_client.channel.members if not m.bot]
+                        all_dislikes_map = await reaction_crud.get_disliked_songs_for_users(voice_members, limit_per_user=50)
+                        for dislikes_list in all_dislikes_map.values():
+                            for d in dislikes_list:
+                                exclude_list.append({"title": d.get("title", ""), "artist": d.get("artist", "")})
+                except Exception as e:
+                    log.warning_cat(Category.DATABASE, "Failed to build exclude list", error=str(e))
+            
+            # Build seed metadata
+            seed_metadata = {
+                "title": track.title,
+                "artist": track.artist,
+                "genre": getattr(track, "genre", None),
+                "year": getattr(track, "year", None),
+            }
+            
+            # Call AI with timeout
+            ai_result = await asyncio.wait_for(
+                ollama_client.suggest_for_play_mode(
+                    seed_track=seed_metadata,
+                    exclude_list=exclude_list,
+                    n_alternatives=5
+                ),
+                timeout=25.0  # Strict timeout
+            )
+            
+            if not ai_result:
+                log.warning_cat(Category.API, "AI returned no results", guild_id=player.guild_id)
+                return
+            
+            # Check if this result is stale (track ID changed)
+            if player.ai_seed_track_id != track.video_id:
+                log.debug_cat(Category.API, "AI result stale, discarding", 
+                            expected=track.video_id, got=player.ai_seed_track_id)
+                return
+            
+            # Resolve autoplay_next
+            autoplay_item = None
+            try:
+                search_query = f"{ai_result.autoplay_next.title} {ai_result.autoplay_next.artist}"
+                if hasattr(self, "enrichment"):
+                    results = await self.enrichment.search_tracks(search_query, filter_type="songs", limit=1, timeout_s=5.0)
+                else:
+                    results = await self.youtube.search(search_query, filter_type="songs", limit=1)
+                
+                if results:
+                    resolved_track = results[0]
+                    duration_seconds = getattr(resolved_track, "duration_seconds", None)
+                    
+                    autoplay_item = QueueItem(
+                        video_id=resolved_track.video_id,
+                        title=resolved_track.title,
+                        artist=resolved_track.artist,
+                        requester_id=None,
+                        discovery_source="ai_autoplay",
+                        discovery_reason=ai_result.autoplay_next.reason,
+                        duration_seconds=duration_seconds,
+                        year=getattr(resolved_track, "year", None),
+                    )
+            except Exception as e:
+                log.warning_cat(Category.SYSTEM, "Failed to resolve AI autoplay", error=str(e))
+            
+            # Resolve alternatives
+            alternatives = []
+            for suggestion in ai_result.alternatives:
+                try:
+                    search_query = f"{suggestion.title} {suggestion.artist}"
+                    if hasattr(self, "enrichment"):
+                        results = await self.enrichment.search_tracks(search_query, filter_type="songs", limit=1, timeout_s=4.0)
+                    else:
+                        results = await self.youtube.search(search_query, filter_type="songs", limit=1)
+                    
+                    if results:
+                        resolved_track = results[0]
+                        duration_seconds = getattr(resolved_track, "duration_seconds", None)
+                        
+                        alt_item  = QueueItem(
+                            video_id=resolved_track.video_id,
+                            title=resolved_track.title,
+                            artist=resolved_track.artist,
+                            requester_id=None,
+                            discovery_source="ai_alternative",
+                            discovery_reason=suggestion.reason,
+                            duration_seconds=duration_seconds,
+                            year=getattr(resolved_track, "year", None),
+                        )
+                        alternatives.append(alt_item)
+                except Exception as e:
+                    log.debug_cat(Category.SYSTEM, "Failed to resolve AI alternative", error=str(e))
+            
+            # Update player state
+            player.ai_autoplay_next = autoplay_item
+            player.ai_alternatives = alternatives
+            player.ai_generated_at = datetime.now(UTC)
+            
+            log.info_cat(
+                Category.API,
+                "AI suggestions generated and resolved",
+                guild_id=player.guild_id,
+                has_autoplay=bool(autoplay_item),
+                alternatives_count=len(alternatives)
+            )
+            
+            # Trigger Now Playing update to show new alternatives
+            await self._notify_now_playing(player)
+            
+        except asyncio.TimeoutError:
+            log.warning_cat(Category.API, "AI generation timeout", guild_id=player.guild_id)
+        except asyncio.CancelledError:
+            log.debug_cat(Category.API, "AI generation cancelled", guild_id=player.guild_id)
+            raise
+        except Exception as e:
+            log.exception_cat(Category.API, "AI generation failed", error=str(e), guild_id=player.guild_id)
 
     async def _notify_now_playing(self, player: GuildPlayer):
         """Ask the NowPlaying cog to render/update the Now Playing message."""
@@ -1410,6 +1812,230 @@ class MusicCog(commands.Cog):
                     error=str(e),
                 )
     
+    async def _handle_user_join_for_ai_discovery(self, member: discord.Member, player: GuildPlayer):
+        """
+        Handle AI-powered recommendations when a user joins the voice channel.
+        
+        Triggered when ai_discovery_on_join is enabled for the guild.
+        Fetches user's likes/dislikes and VC-wide dislikes, gets AI suggestions,
+        resolves to playable tracks, and queues them.
+        """
+        # Debounce: ignore if user joined within last 30 seconds
+        now = datetime.now(UTC)
+        last_join = player._join_debounce.get(member.id)
+        if last_join and (now - last_join).total_seconds() < 30:
+            return
+        
+        player._join_debounce[member.id] = now
+        
+        # Check if feature is enabled
+        if not hasattr(self.bot, "db") or not self.bot.db:
+            return
+        
+        try:
+            guild_crud = GuildCRUD(self.bot.db)
+            ai_on_join = await guild_crud.get_setting(member.guild.id, "ai_discovery_on_join")
+            if not ai_on_join:
+                return
+        except Exception:
+            return
+        
+        # Check if Ollama is available
+        ollama_client = getattr(self.bot, "ollama", None)
+        if not ollama_client:
+            return
+        
+        ai_available = await ollama_client.health_check()
+        if not ai_available:
+            log.debug_cat(
+                Category.API,
+                "AI join discovery skipped - service unavailable",
+                guild_id=member.guild.id,
+                user_id=member.id
+            )
+            return
+        
+        # Fetch user preferences and VC-wide dislikes asynchronously
+        try:
+            from src.database.crud import ReactionCRUD, PlaybackCRUD
+            reaction_crud = ReactionCRUD(self.bot.db)
+            playback_crud = PlaybackCRUD(self.bot.db)
+            
+            # Get user's likes and dislikes
+            liked_tracks = await reaction_crud.get_liked_songs(member.id, limit=20)
+            user_disliked = await reaction_crud.get_disliked_songs(member.id, limit=50)
+            
+            # Get dislikes from all other non-bot members in the VC
+            vc_members = [m.id for m in player.voice_client.channel.members if not m.bot and m.id != member.id]
+            group_dislikes_map = {}
+            if vc_members:
+                group_dislikes_map = await reaction_crud.get_disliked_songs_for_users(vc_members, limit_per_user=50)
+            
+            # Flatten group dislikes
+            group_disliked = []
+            for dislikes_list in group_dislikes_map.values():
+                group_disliked.extend(dislikes_list)
+            
+            # Get recent playback to exclude
+            recent_playback = await playback_crud.get_recent_playback(member.guild.id, limit=100)
+            
+            # Build exclude list
+            exclude_list = []
+            seen_ids = set()
+            
+            # Add user dislikes
+            for track in user_disliked:
+                track_id = track.get("id") or track.get("canonical_yt_id")
+                if track_id and track_id not in seen_ids:
+                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
+                    seen_ids.add(track_id)
+            
+            # Add group dislikes
+            for track in group_disliked:
+                track_id = track.get("id") or track.get("canonical_yt_id")
+                if track_id and track_id not in seen_ids:
+                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
+                    seen_ids.add(track_id)
+            
+            # Add recent playback
+            for track in recent_playback:
+                track_id = track.get("song_id") or track.get("canonical_yt_id")
+                if track_id and track_id not in seen_ids:
+                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
+                    seen_ids.add(track_id)
+            
+            # Convert likes to simple dict format
+            liked_simple = [{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks]
+            user_disliked_simple = [{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in user_disliked]
+            group_disliked_simple = [{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in group_disliked]
+            
+            # Get AI suggestions
+            suggestions = await ollama_client.suggest_for_user(
+                liked_tracks=liked_simple,
+                disliked_tracks=user_disliked_simple,
+                group_disliked_tracks=group_disliked_simple,
+                exclude_list=exclude_list,
+                n_candidates=30  # Ask for more to account for filtering
+            )
+            
+            if not suggestions:
+                log.debug_cat(
+                    Category.API,
+                    "AI join discovery returned no suggestions",
+                    guild_id=member.guild.id,
+                    user_id=member.id
+                )
+                return
+            
+            # Resolve suggestions and queue up to 5
+            queued_count = 0
+            max_duration_setting = await guild_crud.get_setting(member.guild.id, "max_song_duration")
+            max_seconds = 0
+            if max_duration_setting:
+                try:
+                    max_seconds = int(max_duration_setting) * 60
+                except (ValueError, TypeError):
+                    pass
+            
+            for suggestion in suggestions:
+                if queued_count >= 5:
+                    break
+                
+                search_query = f"{suggestion.title} {suggestion.artist}"
+                try:
+                    # Search for the track
+                    if hasattr(self, "enrichment"):
+                        results = await self.enrichment.search_tracks(search_query, filter_type="songs", limit=1, timeout_s=6.0)
+                    else:
+                        results = await self.youtube.search(search_query, filter_type="songs", limit=1)
+                    
+                    if not results:
+                        continue
+                    
+                    track = results[0]
+                    
+                    # Check if already in exclude list
+                    if track.video_id in seen_ids:
+                        continue
+                    
+                    # Check duration
+                    duration_seconds = None
+                    if hasattr(track, "duration_seconds"):
+                        try:
+                            duration_seconds = int(track.duration_seconds) if track.duration_seconds else None
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    if max_seconds > 0 and duration_seconds and duration_seconds > max_seconds:
+                        continue
+                    
+                    # Persist to DB
+                    song_db_id = None
+                    try:
+                        from src.database.crud import SongCRUD
+                        song_crud = SongCRUD(self.bot.db)
+                        song = await song_crud.get_or_create_by_yt_id(
+                            canonical_yt_id=track.video_id,
+                            title=track.title,
+                            artist_name=track.artist,
+                            duration_seconds=duration_seconds,
+                            release_year=getattr(track, "year", None),
+                            album=getattr(track, "album", None),
+                        )
+                        song_db_id = song["id"]
+                    except Exception as e:
+                        log.error_cat(Category.DATABASE, "Failed to persist AI join suggestion", error=str(e))
+                    
+                    # Queue the track
+                    item = QueueItem(
+                        video_id=track.video_id,
+                        title=track.title,
+                        artist=track.artist,
+                        requester_id=None,  # AI-generated
+                        discovery_source="ai_join",
+                        discovery_reason=f"{member.name} joined: {suggestion.reason}",
+                        for_user_id=member.id,
+                        song_db_id=song_db_id,
+                        duration_seconds=duration_seconds,
+                        year=getattr(track, "year", None),
+                    )
+                    player.queue.put_nowait(item)
+                    seen_ids.add(track.video_id)
+                    queued_count += 1
+                    
+                    log.event(
+                        Category.QUEUE,
+                        Event.TRACK_QUEUED,
+                        title=track.title,
+                        artist=track.artist,
+                        source="ai_join",
+                        for_user=member.name
+                    )
+                
+                except Exception as e:
+                    log.error_cat(Category.SYSTEM, "Failed to resolve AI join suggestion", error=str(e), query=search_query)
+            
+            if queued_count > 0:
+                log.info_cat(
+                    Category.DISCOVERY,
+                    f"AI join discovery queued {queued_count} tracks for {member.name}",
+                    guild_id=member.guild.id,
+                    user_id=member.id,
+                    count=queued_count
+                )
+                
+                # Ensure playback loop is running
+                await self.ensure_play_loop(player, reason="ai_join_discovery")
+        
+        except Exception as e:
+            log.exception(
+                "AI join discovery failed",
+                category=Category.API,
+                guild_id=member.guild.id,
+                user_id=member.id,
+                error=str(e)
+            )
+    
     # ==================== EVENTS ====================
     
     @commands.Cog.listener()
@@ -1453,6 +2079,14 @@ class MusicCog(commands.Cog):
         player = self.players.get(member.guild.id)
         if not player or not player.voice_client or not player.voice_client.channel:
             return
+        
+        # Handle user joining the bot's voice channel (AI discovery on join)
+        if (
+            not before.channel == player.voice_client.channel
+            and after.channel == player.voice_client.channel
+        ):
+            # User joined the bot's channel
+            await self._handle_user_join_for_ai_discovery(member, player)
         
         # Check if bot is alone in its current voice channel
         if before.channel == player.voice_client.channel and not after.channel == player.voice_client.channel:

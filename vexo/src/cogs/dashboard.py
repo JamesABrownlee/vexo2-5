@@ -1006,6 +1006,8 @@ class DashboardCog(commands.Cog):
         guild_id = int(request.match_info["guild_id"])
         data = await request.json()
         
+        log.info(f"Dashboard settings update received - guild_id={guild_id}, data={data}")
+        
         if hasattr(self.bot, "db"):
             from src.database.crud import GuildCRUD
             crud = GuildCRUD(self.bot.db)
@@ -1025,6 +1027,13 @@ class DashboardCog(commands.Cog):
                  await crud.set_setting(guild_id, "now_playing_artwork_enabled", bool(data["now_playing_artwork_enabled"]))
             if "radio_presenter_enabled" in data:
                  await crud.set_setting(guild_id, "radio_presenter_enabled", bool(data["radio_presenter_enabled"]))
+            
+            # AI Discovery settings
+            if "ai_discovery_enabled" in data:
+                 log.info(f"Saving ai_discovery_enabled={bool(data['ai_discovery_enabled'])} for guild {guild_id}")
+                 await crud.set_setting(guild_id, "ai_discovery_enabled", bool(data["ai_discovery_enabled"]))
+            if "ai_discovery_on_join" in data:
+                 await crud.set_setting(guild_id, "ai_discovery_on_join", bool(data["ai_discovery_on_join"]))
                  
             # Apply to active player if exists
             music = self.bot.get_cog("MusicCog")

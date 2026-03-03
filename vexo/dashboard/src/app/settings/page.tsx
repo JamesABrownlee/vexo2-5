@@ -1,6 +1,6 @@
 'use client';
 
-import { Settings as SettingsIcon, Save, Globe, Volume2, Sparkles, Shield } from 'lucide-react';
+import { Settings as SettingsIcon, Save, Globe, Volume2, Sparkles, Shield, Brain } from 'lucide-react';
 import { useState } from 'react';
 
 interface SettingToggle {
@@ -44,11 +44,32 @@ export default function SettingsPage() {
         },
     ]);
 
+    const [aiSettings, setAiSettings] = useState<SettingToggle[]>([
+        {
+            id: 'ai_discovery_enabled',
+            label: 'AI-Powered Discovery',
+            description: 'Use AI to suggest songs based on user preferences (requires Ollama)',
+            enabled: false,
+        },
+        {
+            id: 'ai_discovery_on_join',
+            label: 'AI Recommendations on Join',
+            description: 'Queue personalized AI suggestions when users join the voice channel',
+            enabled: false,
+        },
+    ]);
+
     const [defaultVolume, setDefaultVolume] = useState(50);
     const [discoveryChance, setDiscoveryChance] = useState(70);
 
     const toggleSetting = (id: string) => {
         setSettings(prev =>
+            prev.map(s => (s.id === id ? { ...s, enabled: !s.enabled } : s))
+        );
+    };
+
+    const toggleAiSetting = (id: string) => {
+        setAiSettings(prev =>
             prev.map(s => (s.id === id ? { ...s, enabled: !s.enabled } : s))
         );
     };
@@ -97,6 +118,41 @@ export default function SettingsPage() {
                             </button>
                         </div>
                     ))}
+                </div>
+            </div>
+
+            {/* AI Discovery Settings */}
+            <div className="bento-card bg-gradient-to-br from-violet-500/5 to-pink-500/5 border-violet-500/20">
+                <h2 className="text-lg font-semibold text-white flex items-center gap-2 mb-6">
+                    <Brain className="w-5 h-5 text-violet-400" />
+                    AI Discovery
+                    <span className="text-xs font-normal px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-400">Beta</span>
+                </h2>
+                <div className="space-y-4">
+                    {aiSettings.map((setting) => (
+                        <div key={setting.id} className="flex items-center justify-between p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
+                            <div>
+                                <p className="text-sm font-medium text-white">{setting.label}</p>
+                                <p className="text-xs text-zinc-500 mt-0.5">{setting.description}</p>
+                            </div>
+                            <button
+                                onClick={() => toggleAiSetting(setting.id)}
+                                className={`relative w-12 h-6 rounded-full transition-colors ${setting.enabled ? 'bg-violet-500' : 'bg-zinc-700'
+                                    }`}
+                            >
+                                <span
+                                    className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${setting.enabled ? 'left-7' : 'left-1'
+                                        }`}
+                                />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+                <div className="mt-4 p-3 rounded-xl bg-violet-500/10 border border-violet-500/20">
+                    <p className="text-xs text-violet-300">
+                        <strong>New:</strong> Use <code className="px-1 py-0.5 rounded bg-violet-500/20">/play ai &lt;song&gt;</code> to queue a seed song with AI-generated follow-ups.
+                        AI discovery will automatically activate when enabled and Ollama is available.
+                    </p>
                 </div>
             </div>
 

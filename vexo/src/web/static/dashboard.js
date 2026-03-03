@@ -1348,6 +1348,16 @@ async function loadSettingsTab() {
                     ? !!data.radio_presenter_enabled
                     : true;
             }
+
+            const aiEnabled = document.getElementById('setting-ai-discovery-enabled');
+            if (aiEnabled) {
+                aiEnabled.checked = !!data.ai_discovery_enabled;
+            }
+
+            const aiOnJoin = document.getElementById('setting-ai-discovery-on-join');
+            if (aiOnJoin) {
+                aiOnJoin.checked = !!data.ai_discovery_on_join;
+            }
         } catch (e) { console.error(e); }
     }
 }
@@ -1389,21 +1399,36 @@ function toggleNotifications() {
 async function saveServerSettings() {
     if (!currentGuild) return;
 
-    const preBuffer = document.getElementById('setting-pre-buffer').checked;
-    const bufferAmount = document.getElementById('setting-buffer-amount').value;
-    const maxDuration = document.getElementById('setting-max-duration').value;
-    const radioPresenterEnabled = document.getElementById('setting-radio-presenter-enabled').checked;
+    const preBuffer = document.getElementById('setting-pre-buffer')?.checked;
+    const bufferAmount = document.getElementById('setting-buffer-amount')?.value;
+    const maxDuration = document.getElementById('setting-max-duration')?.value;
+    const radioPresenterEnabled = document.getElementById('setting-radio-presenter-enabled')?.checked;
+    const aiDiscoveryEnabled = document.getElementById('setting-ai-discovery-enabled')?.checked;
+    const aiDiscoveryOnJoin = document.getElementById('setting-ai-discovery-on-join')?.checked;
+
+    console.log('AI Discovery Elements:', {
+        aiElement: document.getElementById('setting-ai-discovery-enabled'),
+        aiOnJoinElement: document.getElementById('setting-ai-discovery-on-join'),
+        aiDiscoveryEnabled,
+        aiDiscoveryOnJoin
+    });
+
+    const payload = {
+        pre_buffer: preBuffer,
+        buffer_amount: parseInt(bufferAmount),
+        max_song_duration: parseInt(maxDuration),
+        radio_presenter_enabled: radioPresenterEnabled,
+        ai_discovery_enabled: aiDiscoveryEnabled,
+        ai_discovery_on_join: aiDiscoveryOnJoin
+    };
+
+    console.log('Sending settings payload:', payload);
 
     try {
         const res = await fetch(API.settings(currentGuild), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                pre_buffer: preBuffer,
-                buffer_amount: parseInt(bufferAmount),
-                max_song_duration: parseInt(maxDuration),
-                radio_presenter_enabled: radioPresenterEnabled
-            })
+            body: JSON.stringify(payload)
         });
 
         if (res.ok) alert('Settings saved!');

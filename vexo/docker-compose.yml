@@ -1,9 +1,8 @@
 services:
   musicbot:
-    image: ghcr.io/jamesabrownlee/vexo2-5:latest
+    build: .
     container_name: smart-music-bot
     restart: unless-stopped
-    pull_policy: always
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
@@ -22,6 +21,9 @@ services:
       - SPOTIFY_OAUTH_CLIENT_SECRET=${SPOTIFY_OAUTH_CLIENT_SECRET}
       - SPOTIFY_OAUTH_REDIRECT_URI=${SPOTIFY_OAUTH_REDIRECT_URI}
       - OAUTH_SESSION_COOKIE_SECURE=${OAUTH_SESSION_COOKIE_SECURE:-false}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-https://ollama.plingindigo.org}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+      - OLLAMA_TOKEN=${OLLAMA_TOKEN}
     volumes:
       - ./data:/app/data
     ports:
@@ -35,7 +37,8 @@ services:
       - vexo-network
 
   dashboard:
-    image: ghcr.io/jamesabrownlee/vexo2-5:latest
+    build:
+      context: ./dashboard
     container_name: vexo-dashboard
     restart: unless-stopped
     environment:
@@ -45,7 +48,7 @@ services:
     volumes:
       - ./data:/app/data:ro # Mount database read-only
     ports:
-      - "3000:3000"
+      - "3500:3000"
     depends_on:
       - musicbot
     healthcheck:

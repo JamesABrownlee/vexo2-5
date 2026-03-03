@@ -26,17 +26,56 @@ log = get_logger(__name__)
 
 
 class NowPlayingView(discord.ui.View):
-    """Interactive Now Playing controls with dynamic queue select."""
+    """Interactive Now Playing controls with dynamic queue select and AI alternatives."""
 
     # Persistent view: timeout must be None and every component needs a custom_id.
-    def __init__(self, bot: commands.Bot, queue_items: list = None):
+    def __init__(self, bot: commands.Bot, queue_items: list = None, ai_alternatives: list = None):
         super().__init__(timeout=None)
         self.bot = bot
 
-        # Add select menu with queue items if provided.
-        # Note: discord.py adds decorator-defined children during View.__init__.
-        # If we add the select after that, it appears at the end; we want it first.
-        if queue_items:
+        log.info_cat(
+            Category.SYSTEM,
+            "NowPlayingView init",
+            queue_items_count=len(queue_items) if queue_items else 0,
+            ai_alternatives_count=len(ai_alternatives) if ai_alternatives else 0
+        )
+
+        # AI MODE: Show only AI alternatives dropdown
+        if ai_alternatives:
+            log.info_cat(
+                Category.SYSTEM,
+                "Creating AI alternatives dropdown (AI mode - no queue dropdown)",
+                count=len(ai_alternatives)
+            )
+            
+            ai_select_options = [
+                discord.SelectOption(
+                    label=f"🤖 {i+1}. {ai.title[:45]}",
+                    description=f"{ai.artist[:70]} • {ai.discovery_reason[:30] if ai.discovery_reason else ''}",
+                    value=f"ai:{i}",
+                )
+                for i, ai in enumerate(ai_alternatives[:5])  # Limit to 5 AI alternatives
+            ]
+
+            if ai_select_options:
+                log.info_cat(
+                    Category.SYSTEM,
+                    "Adding AI select to view",
+                    options_count=len(ai_select_options)
+                )
+                ai_select = discord.ui.Select(
+                    placeholder="🤖 AI Alternatives - Choose different track...",
+                    custom_id="np:ai_alternative",
+                    options=ai_select_options,
+                    min_values=1,
+                    max_values=1,
+                    row=0,
+                )
+                ai_select.callback = self.ai_alternative_callback
+                self.add_item(ai_select)
+        
+        # NORMAL MODE: Show queue dropdown (only if NOT in AI mode)
+        elif queue_items:
             existing_items = list(self.children)
 
             select_options = [
@@ -50,7 +89,7 @@ class NowPlayingView(discord.ui.View):
 
             if select_options:
                 select = discord.ui.Select(
-                    placeholder="⏭️ Choose next song...",
+                    placeholder="⏭️ Skip to queued song...",
                     custom_id="np:skip_to",
                     options=select_options,
                     min_values=1,
@@ -59,6 +98,7 @@ class NowPlayingView(discord.ui.View):
                 )
                 select.callback = self.skip_to_callback
 
+                # Clear and re-add in order
                 self.clear_items()
                 self.add_item(select)
                 for item in existing_items:
@@ -552,6 +592,98 @@ class NowPlayingView(discord.ui.View):
         finally:
             await self._set_all_disabled(False, interaction)
             await self._release_np_lock(player)
+    
+    async def ai_alternative_callback(self, interaction: discord.Interaction):
+        """User selected an AI alternative track from the dropdown."""
+        with log.span(
+            Category.USER,
+            "np_select_ai_alternative",
+            module=__name__,
+            view="NowPlayingView",
+            custom_id="np:ai_alternative",
+            interaction_id=getattr(interaction, "id", None),
+            guild_id=interaction.guild_id,
+            user_id=getattr(interaction.user, "id", None),
+        ):
+            if not await self._safe_defer(interaction, ephemeral=True):
+                return
+        player, guild_id = await self._guard_player_and_message(interaction)
+        if not player:
+            return
+
+        if not await self._try_acquire_np_lock(interaction, player):
+            return
+
+        try:
+            await self._set_all_disabled(True, interaction)
+            
+            # Get selected AI alternative index
+            values = interaction.data.get("values") if isinstance(interaction.data, dict) else None
+            if not values or len(values) == 0:
+                await self._safe_send(interaction, "❌ No selection provided.", ephemeral=True)
+                return
+            
+            # Parse "ai:N" format
+            selected_value = values[0]
+            if not selected_value.startswith("ai:"):
+                await self._safe_send(interaction, "❌ Invalid selection format.", ephemeral=True)
+                return
+            
+            try:
+                selected_index = int(selected_value.split(":")[1])
+            except (ValueError, IndexError):
+                await self._safe_send(interaction, "❌ Invalid selection index.", ephemeral=True)
+                return
+            
+            # Get AI alternatives from player
+            ai_alternatives = getattr(player, "ai_alternatives", [])
+            if selected_index < 0 or selected_index >= len(ai_alternatives):
+                await self._safe_send(interaction, "❌ AI alternative not found.", ephemeral=True)
+                return
+            
+            selected_track = ai_alternatives[selected_index]
+            
+            # Insert at front of queue (play next)
+            # Create a temporary queue to hold current items
+            temp_queue = []
+            while not player.queue.empty():
+                try:
+                    temp_queue.append(player.queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            
+            # Add selected AI track first
+            player.queue.put_nowait(selected_track)
+            
+            # Re-add all other items
+            for item in temp_queue:
+                player.queue.put_nowait(item)
+            
+            # Skip current track to play the selected one
+            vc = player.voice_client
+            if vc and (vc.is_playing() or vc.is_paused()):
+                vc.stop()
+            
+            await self._safe_toast(
+                interaction,
+                f"🤖 **AI Choice:** Now playing **{selected_track.title}** by {selected_track.artist}"
+            )
+            
+            log.info_cat(
+                Category.USER,
+                "ai_alternative_selected",
+                guild_id=guild_id,
+                user_id=interaction.user.id,
+                title=selected_track.title,
+                artist=selected_track.artist
+            )
+            
+        except Exception as e:
+            log.exception_cat(Category.SYSTEM, "NowPlayingView ai_alternative failed", error=str(e))
+            await self._safe_send(interaction, "❌ Error selecting AI alternative.", ephemeral=True)
+        finally:
+            await self._set_all_disabled(False, interaction)
+            await self._release_np_lock(player)
 
 
 class NowPlayingCog(commands.Cog):
@@ -854,7 +986,30 @@ class NowPlayingCog(commands.Cog):
 
         # Create view with dynamic queue select options (top 10)
         queue_items = list(player.queue._queue)[:10]
-        view = NowPlayingView(self.bot, queue_items=queue_items)
+        
+        # Add AI alternatives if in AI mode
+        ai_alternatives = []
+        ai_mode_enabled = getattr(player, "ai_mode_enabled", False)
+        player_alternatives = getattr(player, "ai_alternatives", [])
+        
+        log.info_cat(
+            Category.SYSTEM,
+            "Now Playing AI check",
+            guild_id=player.guild_id,
+            ai_mode_enabled=ai_mode_enabled,
+            alternatives_count=len(player_alternatives) if player_alternatives else 0
+        )
+        
+        if ai_mode_enabled and player_alternatives:
+            ai_alternatives = player_alternatives[:5]  # Maximum 5 alternatives
+            log.info_cat(
+                Category.SYSTEM,
+                "Passing AI alternatives to view",
+                guild_id=player.guild_id,
+                count=len(ai_alternatives)
+            )
+        
+        view = NowPlayingView(self.bot, queue_items=queue_items, ai_alternatives=ai_alternatives)
 
         loading_embed = discord.Embed(
             title="🎵 Now Playing",

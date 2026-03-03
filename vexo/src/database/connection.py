@@ -109,7 +109,7 @@ class DatabaseManager:
                                     played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                     completed BOOLEAN DEFAULT FALSE,
                                     skip_reason TEXT CHECK(skip_reason IN ('user', 'vote', 'error') OR skip_reason IS NULL),
-                                    discovery_source TEXT CHECK(discovery_source IN ('user_request', 'similar', 'artist', 'same_artist', 'wildcard', 'library')),
+                                    discovery_source TEXT CHECK(discovery_source IN ('user_request', 'similar', 'artist', 'same_artist', 'wildcard', 'library', 'ai_discovery')),
                                     discovery_reason TEXT,
                                     for_user_id INTEGER REFERENCES users(id)
                                 );
