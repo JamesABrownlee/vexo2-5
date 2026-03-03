@@ -648,7 +648,7 @@ class PlayCog(commands.Cog):
 
             # Enable AI mode
             player.ai_mode_enabled = True
-            player.ai_seed_track_id = None  # Will be set when track starts
+            player.ai_seed_track_id = seed_track.video_id  # Set seed now
             player.ai_autoplay_next = None
             player.ai_alternatives = []
             player.ai_generated_at = None
@@ -656,6 +656,12 @@ class PlayCog(commands.Cog):
             # Cancel any pending AI generation
             if player._ai_generation_task and not player._ai_generation_task.done():
                 player._ai_generation_task.cancel()
+            
+            # Start AI generation immediately for seed track
+            # This runs in background while playback starts, so alternatives are ready when Now Playing is sent
+            player._ai_generation_task = asyncio.create_task(
+                music._generate_ai_suggestions_for_track(player, seed_item)
+            )
             
             # Start playback
             await music.ensure_play_loop(player, reason="play_ai")

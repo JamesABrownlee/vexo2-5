@@ -184,18 +184,28 @@ class MusicCog(commands.Cog):
         if not player.autoplay:
             return None
         
-        # AI Mode: Use AI autoplay next if available
-        if player.ai_mode_enabled and player.ai_autoplay_next:
-            item = player.ai_autoplay_next
-            player.ai_autoplay_next = None  # Clear after use
-            log.info_cat(
-                Category.DISCOVERY,
-                "Using AI autoplay next track",
-                guild_id=player.guild_id,
-                title=item.title
-            )
-            return item
+        # AI Mode: Use AI autoplay next if available, do NOT use regular discovery
+        if player.ai_mode_enabled:
+            if player.ai_autoplay_next:
+                item = player.ai_autoplay_next
+                player.ai_autoplay_next = None  # Clear after use
+                log.info_cat(
+                    Category.DISCOVERY,
+                    "Using AI autoplay next track",
+                    guild_id=player.guild_id,
+                    title=item.title
+                )
+                return item
+            else:
+                # AI mode but no autoplay ready yet - wait for AI generation to complete
+                log.debug_cat(
+                    Category.DISCOVERY,
+                    "AI mode enabled but no autoplay_next ready - waiting",
+                    guild_id=player.guild_id
+                )
+                return None
             
+        # Regular discovery mode (not AI)
         # Use prefetched discovery song if available
         if player._next_discovery:
             item = player._next_discovery
@@ -955,15 +965,31 @@ class MusicCog(commands.Cog):
                     
                     # AI Mode: Generate suggestions for current track
                     if player.ai_mode_enabled and item.video_id:
-                        # Cancel any pending AI generation
-                        if player._ai_generation_task and not player._ai_generation_task.done():
-                            player._ai_generation_task.cancel()
-                        
-                        # Set seed track ID and start new generation
-                        player.ai_seed_track_id = item.video_id
-                        player._ai_generation_task = asyncio.create_task(
-                            self._generate_ai_suggestions_for_track(player, item)
+                        # Only start new generation if we don't already have one running for this track
+                        # (play_ai command pre-starts generation for the seed track)
+                        already_generating = (
+                            player.ai_seed_track_id == item.video_id 
+                            and player._ai_generation_task 
+                            and not player._ai_generation_task.done()
                         )
+                        
+                        if not already_generating:
+                            # Cancel any stale pending generation
+                            if player._ai_generation_task and not player._ai_generation_task.done():
+                                player._ai_generation_task.cancel()
+                            
+                            # Set seed track ID and start new generation
+                            player.ai_seed_track_id = item.video_id
+                            player._ai_generation_task = asyncio.create_task(
+                                self._generate_ai_suggestions_for_track(player, item)
+                            )
+                        else:
+                            log.debug_cat(
+                                Category.API, 
+                                "AI generation already in progress for this track",
+                                guild_id=player.guild_id,
+                                video_id=item.video_id
+                            )
                     
                     max_wait = (item.duration_seconds or 600) + 60
                     try:
@@ -1304,9 +1330,9 @@ class MusicCog(commands.Cog):
             return None
         
         except Exception as e:
-            log.exception(
+            log.exception_cat(
+                Category.API,
                 "AI autoplay discovery failed",
-                category=Category.API,
                 guild_id=player.guild_id,
                 error=str(e)
             )
@@ -1558,8 +1584,29 @@ class MusicCog(commands.Cog):
                 alternatives_count=len(alternatives)
             )
             
-            # Trigger Now Playing update to show new alternatives
-            await self._notify_now_playing(player)
+            # Update the Now Playing message view directly with AI alternatives
+            # This is more efficient than triggering a full refresh
+            if player.last_np_msg and alternatives:
+                try:
+                    # Import NowPlayingView here to avoid circular imports
+                    from src.cogs.nowplaying import NowPlayingView
+                    
+                    # Create new view with AI alternatives (no queue items in AI mode)
+                    new_view = NowPlayingView(self.bot, queue_items=None, ai_alternatives=alternatives)
+                    
+                    # Edit the message with the new view (keep existing embed/content)
+                    await player.last_np_msg.edit(view=new_view)
+                    
+                    log.info_cat(
+                        Category.SYSTEM,
+                        "Updated Now Playing view with AI alternatives",
+                        guild_id=player.guild_id,
+                        alternatives_count=len(alternatives)
+                    )
+                except discord.NotFound:
+                    log.debug_cat(Category.SYSTEM, "Now Playing message not found for view update", guild_id=player.guild_id)
+                except Exception as e:
+                    log.debug_cat(Category.SYSTEM, "Failed to update Now Playing view", error=str(e), guild_id=player.guild_id)
             
         except asyncio.TimeoutError:
             log.warning_cat(Category.API, "AI generation timeout", guild_id=player.guild_id)
@@ -2028,9 +2075,9 @@ class MusicCog(commands.Cog):
                 await self.ensure_play_loop(player, reason="ai_join_discovery")
         
         except Exception as e:
-            log.exception(
+            log.exception_cat(
+                Category.API,
                 "AI join discovery failed",
-                category=Category.API,
                 guild_id=member.guild.id,
                 user_id=member.id,
                 error=str(e)
