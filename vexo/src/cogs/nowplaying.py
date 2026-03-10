@@ -649,35 +649,29 @@ class NowPlayingView(discord.ui.View):
             
             selected_track = ai_alternatives[selected_index]
             
-            # Insert at front of queue (play next)
-            # Create a temporary queue to hold current items
+            # Insert at front of queue (play next) without interrupting current playback.
             temp_queue = []
             while not player.queue.empty():
                 try:
                     temp_queue.append(player.queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
-            
-            # Add selected AI track first
+
+            # Add selected AI track first (it will be played after the current track)
             player.queue.put_nowait(selected_track)
-            
+
             # Re-add all other items
             for item in temp_queue:
                 player.queue.put_nowait(item)
-            
-            # Skip current track to play the selected one
-            vc = player.voice_client
-            if vc and (vc.is_playing() or vc.is_paused()):
-                vc.stop()
-            
+
             await self._safe_toast(
                 interaction,
-                f"🤖 **AI Choice:** Now playing **{selected_track.title}** by {selected_track.artist}"
+                f"🤖 **AI Choice:** Queued next **{selected_track.title}** by {selected_track.artist}"
             )
             
             log.info_cat(
                 Category.USER,
-                "ai_alternative_selected",
+                "ai_alternative_queued",
                 guild_id=guild_id,
                 user_id=interaction.user.id,
                 title=selected_track.title,
@@ -1354,23 +1348,36 @@ class NowPlayingCog(commands.Cog):
 
             file = discord.File(io.BytesIO(image_data), filename="nowplaying.png")
 
-            # Replace the loading embed with the image.
+            # Prefer deleting the original loading embed and re-sending the image-only message
+            # so the original embed is removed. Fall back to editing when delete is not permitted.
             try:
-                await self._discord_call_with_backoff(
-                    guild_id,
-                    "swap_loading_to_image_edit",
-                    lambda: msg.edit(embed=None, view=view, attachments=[file]),
-                )
-            except TypeError:
-                # Some libs require deleting and re-sending to attach a file.
+                # Attempt to delete the old message first (clean replacement)
                 try:
                     await self._discord_call_with_backoff(
                         guild_id,
                         "swap_loading_to_image_delete",
                         lambda: msg.delete(),
                     )
-                except Exception:
+                except discord.Forbidden:
+                    # Cannot delete due to permissions; try to edit to replace embed instead.
+                    await self._discord_call_with_backoff(
+                        guild_id,
+                        "swap_loading_to_image_edit",
+                        lambda: msg.edit(embed=None, view=view, attachments=[file]),
+                    )
                     return
+                except Exception:
+                    # If delete failed for any other reason, attempt an edit as fallback.
+                    try:
+                        await self._discord_call_with_backoff(
+                            guild_id,
+                            "swap_loading_to_image_edit",
+                            lambda: msg.edit(embed=None, view=view, attachments=[file]),
+                        )
+                    except Exception:
+                        return
+
+                # Send new message with the rendered image
                 new_msg = await self._discord_call_with_backoff(
                     guild_id,
                     "swap_loading_to_image_resend",
@@ -1383,6 +1390,26 @@ class NowPlayingCog(commands.Cog):
                         await np_crud.upsert(guild_id, channel_id, new_msg.id)
                     except Exception:
                         pass
+                return
+            except Exception:
+                # Keep the initial embed unchanged when artwork generation fails.
+                try:
+                    await self._discord_call_with_backoff(
+                        guild_id,
+                        "swap_loading_to_image_edit",
+                        lambda: msg.edit(embed=None, view=view, attachments=[file]),
+                    )
+                except Exception:
+                    # If all else fails, log and return.
+                    log.debug_cat(
+                        Category.SYSTEM,
+                        "now_playing_image_swap_failed_edit_fallback",
+                        guild_id=guild_id,
+                        channel_id=channel_id,
+                        message_id=message_id,
+                        video_id=video_id,
+                    )
+                    return
         except Exception as e:
             # Keep the initial embed unchanged when artwork generation fails.
             log.debug_cat(

@@ -83,7 +83,7 @@ class DiscoveryEngine:
     def __init__(
         self,
         youtube: YouTubeService,
-        spotify: SpotifyService,
+        spotify: SpotifyService | None,
         normalizer: SongNormalizer,
         preference_crud: "PreferenceCRUD",
         playback_crud: "PlaybackCRUD",
@@ -302,6 +302,8 @@ class DiscoveryEngine:
         recent_song_keys: set[str],
     ) -> YTTrack | None:
         """Find a different song from a liked artist."""
+        if not self.spotify:
+            return None
         # Get user's top artists from preferences
         top_artists = await self.preferences.get_top_preferences(user_id, "artist", limit=10)
         

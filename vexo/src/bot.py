@@ -294,7 +294,10 @@ class MusicBot(commands.Bot):
         from src.services.ai.factory import AIClientFactory
         
         self.youtube = YouTubeService(config.YTDL_COOKIES_PATH, config.YTDL_PO_TOKEN)
-        self.spotify = SpotifyService(config.SPOTIFY_CLIENT_ID, config.SPOTIFY_CLIENT_SECRET)
+        if config.SPOTIFY_CLIENT_ID and config.SPOTIFY_CLIENT_SECRET:
+            self.spotify = SpotifyService(config.SPOTIFY_CLIENT_ID, config.SPOTIFY_CLIENT_SECRET)
+        else:
+            self.spotify = None
         self.normalizer = SongNormalizer(self.youtube)
         # Instantiate provider factory and resolve an ai client instance.
         self._ai_factory = AIClientFactory()

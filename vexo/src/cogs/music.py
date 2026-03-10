@@ -1532,7 +1532,7 @@ class MusicCog(commands.Cog):
                 ai_client.suggest_for_play_mode(
                     seed_track=seed_metadata,
                     exclude_list=exclude_list,
-                    n_alternatives=5
+                    n_alternatives=9,
                 ),
                 timeout=25.0  # Strict timeout
             )

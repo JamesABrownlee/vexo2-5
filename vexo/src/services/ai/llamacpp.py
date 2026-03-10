@@ -27,6 +27,29 @@ log = get_logger(__name__)
 class LlamaCppClient(BaseAIClient):
     provider_name = "llamacpp"
 
+    SYSTEM_PROMPT = (
+        "You are a music recommendation service. "
+        "Return only valid JSON. "
+        "Do not include reasoning. "
+        "Do not include explanations. "
+        "Do not include markdown. "
+        "Do not include code fences. "
+        "Do not include <think> tags. "
+        "Do not output any text before or after the JSON."
+    )
+    PLAY_MODE_SYSTEM_PROMPT = (
+        "You are a music recommendation service. "
+        "Return only valid JSON with exactly two top-level keys: \"autoplay_next\" and \"alternatives\". "
+        "\"autoplay_next\" must be an object with keys: \"title\", \"artist\", \"reason\". "
+        "\"alternatives\" must be an array of objects, each with keys: \"title\", \"artist\", \"reason\". "
+        "Do not include reasoning. "
+        "Do not include explanations. "
+        "Do not include markdown. "
+        "Do not include code fences. "
+        "Do not include <think> tags. "
+        "Do not output any text before or after the JSON."
+    )
+
     def __init__(self, base_url: str = "http://localhost:8080", model: str = "", bearer_token: Optional[str] = None, health_cache_ttl: int = 45, request_timeout: int = 25):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -142,29 +165,57 @@ class LlamaCppClient(BaseAIClient):
             return {"_raw_text": text}
 
     @staticmethod
-    def _extract_text(data: dict) -> Optional[str]:
+    def _extract_text_details(data: dict) -> tuple[Optional[str], bool, Optional[str], bool, bool]:
         if not data:
-            return None
+            return None, False, None, False, False
+
+        used_reasoning = False
+        finish_reason = None
+        reasoning_available = False
+        content_empty_reasoning = False
+
         if "choices" in data and data["choices"]:
             choice = data["choices"][0]
             if isinstance(choice, dict):
+                finish_reason = choice.get("finish_reason") if isinstance(choice.get("finish_reason"), str) else None
                 message = choice.get("message")
-                if isinstance(message, dict) and isinstance(message.get("content"), str):
-                    return message.get("content")
-                delta = choice.get("delta")
-                if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-                    return delta.get("content")
-                if isinstance(choice.get("text"), str):
-                    return choice.get("text")
-        if isinstance(data.get("text"), str):
-            return data.get("text")
-        if isinstance(data.get("content"), str):
-            return data.get("content")
-        if isinstance(data.get("response"), str):
-            return data.get("response")
-        if isinstance(data.get("_raw_text"), str):
-            return data.get("_raw_text")
-        return None
+                if isinstance(message, dict):
+                    content = message.get("content") if isinstance(message.get("content"), str) else None
+                    reasoning = message.get("reasoning_content") if isinstance(message.get("reasoning_content"), str) else None
+                    if reasoning:
+                        reasoning_available = True
+                    if (not content or not content.strip()) and reasoning_available:
+                        content_empty_reasoning = True
+                    if content and content.strip():
+                        return content, False, finish_reason, reasoning_available, content_empty_reasoning
+                    if isinstance(choice.get("text"), str) and choice.get("text"):
+                        return choice.get("text"), False, finish_reason, reasoning_available, content_empty_reasoning
+                    if reasoning and reasoning.strip():
+                        return reasoning, True, finish_reason, reasoning_available, content_empty_reasoning
+
+        if isinstance(data.get("text"), str) and data.get("text"):
+            return data.get("text"), False, finish_reason, reasoning_available, content_empty_reasoning
+        if isinstance(data.get("content"), str) and data.get("content"):
+            return data.get("content"), False, finish_reason, reasoning_available, content_empty_reasoning
+        if isinstance(data.get("response"), str) and data.get("response"):
+            return data.get("response"), False, finish_reason, reasoning_available, content_empty_reasoning
+        if isinstance(data.get("_raw_text"), str) and data.get("_raw_text"):
+            return data.get("_raw_text"), False, finish_reason, reasoning_available, content_empty_reasoning
+
+        return None, used_reasoning, finish_reason, reasoning_available, content_empty_reasoning
+
+    @staticmethod
+    def _clean_text(text: str) -> tuple[str, Optional[str]]:
+        if not text:
+            return "", None
+        cleaned = text.strip()
+        cleaned = LlamaCppClient._strip_json_label(LlamaCppClient._strip_code_fence(cleaned))
+        cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return cleaned, cleaned[start:end + 1]
+        return cleaned, None
 
     @staticmethod
     def _normalize_suggestions(parsed: object, n_candidates: int) -> list[AISuggestion]:
@@ -267,8 +318,11 @@ class LlamaCppClient(BaseAIClient):
 
         payload = {
             "model": self.model or "gpt",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 512,
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 640,
             "temperature": 0.7,
             "stream": False,
         }
@@ -278,7 +332,7 @@ class LlamaCppClient(BaseAIClient):
             return []
 
         # Attempt to extract text
-        text = self._extract_text(data)
+        text, used_reasoning, finish_reason, reasoning_available, content_empty_reasoning = self._extract_text_details(data)
 
         if not text:
             choice_preview = None
@@ -295,29 +349,36 @@ class LlamaCppClient(BaseAIClient):
             )
             return []
 
-        text = self._strip_json_label(self._strip_code_fence(text))
+        if content_empty_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP content empty with reasoning_content present", finish_reason=finish_reason)
+        if reasoning_available and not used_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP reasoning_content present but content used", finish_reason=finish_reason)
+        if used_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP used reasoning_content fallback", finish_reason=finish_reason)
+        if finish_reason == "length":
+            log.warning_cat(Category.API, "LlamaCPP response truncated", finish_reason=finish_reason)
+
+        cleaned_text, json_block = self._clean_text(text)
 
         # Try to parse JSON
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(json_block or cleaned_text)
         except Exception:
             # Try to find JSON substring
             try:
-                start = text.find('{')
-                end = text.rfind('}')
-                if start != -1 and end != -1 and end > start:
-                    parsed = json.loads(text[start:end + 1])
+                if json_block:
+                    parsed = json.loads(json_block)
                 else:
-                    suggestions = self._extract_pairs_from_text(text, n_candidates)
+                    suggestions = self._extract_pairs_from_text(cleaned_text, n_candidates)
                     if suggestions:
                         return suggestions
-                    log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(text))
+                    log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(cleaned_text))
                     return []
             except Exception:
-                suggestions = self._extract_pairs_from_text(text, n_candidates)
+                suggestions = self._extract_pairs_from_text(cleaned_text, n_candidates)
                 if suggestions:
                     return suggestions
-                log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(text))
+                log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(cleaned_text))
                 return []
 
         return self._normalize_suggestions(parsed, n_candidates)
@@ -327,8 +388,11 @@ class LlamaCppClient(BaseAIClient):
         prompt = f"Based on the user's likes:\n{likes}\nSuggest {n_candidates} songs the user would enjoy. Return JSON with suggestions array of {{title,artist,reason}}."
         payload = {
             "model": self.model or "gpt",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 512,
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 640,
             "temperature": 0.7,
             "stream": False,
         }
@@ -336,7 +400,7 @@ class LlamaCppClient(BaseAIClient):
         if not data:
             return []
 
-        text = self._extract_text(data)
+        text, used_reasoning, finish_reason, reasoning_available, content_empty_reasoning = self._extract_text_details(data)
         if not text:
             choice_preview = None
             if isinstance(data, dict) and data.get("choices"):
@@ -352,39 +416,49 @@ class LlamaCppClient(BaseAIClient):
             )
             return []
 
-        text = self._strip_json_label(self._strip_code_fence(text))
+        if content_empty_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP content empty with reasoning_content present", finish_reason=finish_reason)
+        if reasoning_available and not used_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP reasoning_content present but content used", finish_reason=finish_reason)
+        if used_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP used reasoning_content fallback", finish_reason=finish_reason)
+        if finish_reason == "length":
+            log.warning_cat(Category.API, "LlamaCPP response truncated", finish_reason=finish_reason)
+
+        cleaned_text, json_block = self._clean_text(text)
 
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(json_block or cleaned_text)
         except Exception:
             try:
-                start = text.find('{')
-                end = text.rfind('}')
-                if start != -1 and end != -1 and end > start:
-                    parsed = json.loads(text[start:end + 1])
+                if json_block:
+                    parsed = json.loads(json_block)
                 else:
-                    suggestions = self._extract_pairs_from_text(text, n_candidates)
+                    suggestions = self._extract_pairs_from_text(cleaned_text, n_candidates)
                     if suggestions:
                         return suggestions
-                    log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(text))
+                    log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(cleaned_text))
                     return []
             except Exception:
-                suggestions = self._extract_pairs_from_text(text, n_candidates)
+                suggestions = self._extract_pairs_from_text(cleaned_text, n_candidates)
                 if suggestions:
                     return suggestions
-                log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(text))
+                log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(cleaned_text))
                 return []
 
         return self._normalize_suggestions(parsed, n_candidates)
 
-    async def suggest_for_play_mode(self, seed_track: dict, exclude_list: list[dict], n_alternatives: int = 5) -> Optional[AIPlayModeResult]:
+    async def suggest_for_play_mode(self, seed_track: dict, exclude_list: list[dict], n_alternatives: int = 9) -> Optional[AIPlayModeResult]:
         seed_title = seed_track.get("title", "Unknown")
         seed_artist = seed_track.get("artist", "Unknown")
-        prompt = f"Based on {seed_title} by {seed_artist}, return JSON with 'autoplay_next' and 'alternatives' array (each item title,artist,reason)."
+        prompt = f"Based on {seed_title} by {seed_artist}, suggest up to {n_alternatives} alternatives and return JSON with 'autoplay_next' and 'alternatives' array (each item title,artist,reason)."
         payload = {
             "model": self.model or "gpt",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 512,
+            "messages": [
+                {"role": "system", "content": self.PLAY_MODE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 768,
             "temperature": 0.7,
             "stream": False,
         }
@@ -392,7 +466,7 @@ class LlamaCppClient(BaseAIClient):
         if not data:
             return None
 
-        text = self._extract_text(data)
+        text, used_reasoning, finish_reason, reasoning_available, content_empty_reasoning = self._extract_text_details(data)
         if not text:
             choice_preview = None
             if isinstance(data, dict) and data.get("choices"):
@@ -408,24 +482,31 @@ class LlamaCppClient(BaseAIClient):
             )
             return None
 
-        text = self._strip_json_label(self._strip_code_fence(text))
+        if content_empty_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP content empty with reasoning_content present", finish_reason=finish_reason)
+        if reasoning_available and not used_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP reasoning_content present but content used", finish_reason=finish_reason)
+        if used_reasoning:
+            log.warning_cat(Category.API, "LlamaCPP used reasoning_content fallback", finish_reason=finish_reason)
+        if finish_reason == "length":
+            log.warning_cat(Category.API, "LlamaCPP response truncated", finish_reason=finish_reason)
+
+        cleaned_text, json_block = self._clean_text(text)
 
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(json_block or cleaned_text)
         except Exception:
             try:
-                start = text.find('{')
-                end = text.rfind('}')
-                if start != -1 and end != -1 and end > start:
-                    parsed = json.loads(text[start:end + 1])
+                if json_block:
+                    parsed = json.loads(json_block)
                 else:
                     parsed = None
             except Exception:
                 parsed = None
 
         if parsed is None:
-            autoplay = self._extract_autoplay_from_text(text)
-            alternatives = self._extract_pairs_from_text(text, n_alternatives)
+            autoplay = self._extract_autoplay_from_text(cleaned_text)
+            alternatives = self._extract_pairs_from_text(cleaned_text, n_alternatives)
             if not autoplay and alternatives:
                 first = alternatives[0]
                 autoplay = {"title": first.title, "artist": first.artist, "reason": "AI suggested"}
@@ -435,7 +516,7 @@ class LlamaCppClient(BaseAIClient):
                     autoplay_next=AISuggestion(title=autoplay.get("title"), artist=autoplay.get("artist"), reason=autoplay.get("reason", "AI suggested")),
                     alternatives=alternatives,
                 )
-            log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(text))
+            log.warning_cat(Category.API, "LlamaCPP suggestion parse failed", text=self._truncate(cleaned_text))
             return None
 
         ap = self._coerce_autoplay_next(parsed.get("autoplay_next")) if isinstance(parsed, dict) else None

@@ -1446,8 +1446,12 @@ function updateLocalAiStatusUi() {
     setStatusValue(llamaEl, llamaAvailable === true ? 'Available' : llamaAvailable === false ? 'Unavailable' : 'Unknown', llamaAvailable === true ? 'ok' : llamaAvailable === false ? 'error' : 'warn');
 
     if (messageEl) {
-        messageEl.textContent = localAiStatus?.message ? String(localAiStatus.message) : '';
-        messageEl.style.display = messageEl.textContent ? 'block' : 'none';
+        let messageText = localAiStatus?.message ? String(localAiStatus.message) : '';
+        if (!messageText && ollamaAvailable === false && llamaAvailable === false) {
+            messageText = 'No Local AI providers are available.';
+        }
+        messageEl.textContent = messageText;
+        messageEl.style.display = messageText ? 'block' : 'none';
     }
 }
 

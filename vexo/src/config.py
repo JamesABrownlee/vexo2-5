@@ -16,9 +16,9 @@ class Config:
     # Discord
     DISCORD_TOKEN: str
     
-    # Spotify API
-    SPOTIFY_CLIENT_ID: str
-    SPOTIFY_CLIENT_SECRET: str
+    # Spotify API (optional)
+    SPOTIFY_CLIENT_ID: str | None
+    SPOTIFY_CLIENT_SECRET: str | None
     
     # Database
     DATABASE_PATH: Path
@@ -76,8 +76,6 @@ class Config:
         
         spotify_client_id = os.getenv("SPOTIFY_CLIENT_ID")
         spotify_client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-        if not spotify_client_id or not spotify_client_secret:
-            raise ValueError("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required")
         
         database_path = Path(os.getenv("DATABASE_PATH", "./data/musicbot.db"))
         database_path.parent.mkdir(parents=True, exist_ok=True)
