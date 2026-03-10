@@ -55,9 +55,15 @@ class PlayCog(commands.Cog):
             embed.set_footer(text=f"Action by {display}")
 
             if interaction.response.is_done():
-                await interaction.followup.send(embed=embed, delete_after=delete_after)
+                try:
+                    await interaction.followup.send(embed=embed, delete_after=delete_after)
+                except TypeError:
+                    await interaction.followup.send(embed=embed)
             else:
-                await interaction.response.send_message(embed=embed, delete_after=delete_after)
+                try:
+                    await interaction.response.send_message(embed=embed, delete_after=delete_after)
+                except TypeError:
+                    await interaction.response.send_message(embed=embed)
         except discord.NotFound:
             return
         except Exception as e:
@@ -652,6 +658,8 @@ class PlayCog(commands.Cog):
             player.ai_autoplay_next = None
             player.ai_alternatives = []
             player.ai_generated_at = None
+            player.ai_fallback_pool.clear()
+            player.ai_fallback_ids.clear()
             
             # Cancel any pending AI generation
             if player._ai_generation_task and not player._ai_generation_task.done():

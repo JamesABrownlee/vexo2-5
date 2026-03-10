@@ -55,7 +55,17 @@ class DatabaseManager:
                     logger.error(f"Migration failed: {e}")
 
             # 2. Expand playback_history.discovery_source CHECK constraint (SQLite requires table rebuild).
-            desired_sources = ("user_request", "similar", "artist", "same_artist", "wildcard", "library")
+            desired_sources = (
+                "user_request",
+                "similar",
+                "artist",
+                "same_artist",
+                "wildcard",
+                "library",
+                "ai_discovery",
+                "ai_autoplay",
+                "ai_alternative",
+            )
             try:
                 cur = await db.execute(
                     "SELECT sql FROM sqlite_master WHERE type='table' AND name='playback_history'"
@@ -109,7 +119,7 @@ class DatabaseManager:
                                     played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                     completed BOOLEAN DEFAULT FALSE,
                                     skip_reason TEXT CHECK(skip_reason IN ('user', 'vote', 'error') OR skip_reason IS NULL),
-                                    discovery_source TEXT CHECK(discovery_source IN ('user_request', 'similar', 'artist', 'same_artist', 'wildcard', 'library', 'ai_discovery')),
+                                    discovery_source TEXT CHECK(discovery_source IN ('user_request', 'similar', 'artist', 'same_artist', 'wildcard', 'library', 'ai_discovery', 'ai_autoplay', 'ai_alternative')),
                                     discovery_reason TEXT,
                                     for_user_id INTEGER REFERENCES users(id)
                                 );

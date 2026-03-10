@@ -121,6 +121,8 @@ class GuildPlayer:
     ai_alternatives: list[QueueItem] = field(default_factory=list)  # Resolved alternative tracks
     ai_generated_at: datetime | None = None  # Timestamp of last AI generation
     _ai_generation_task: asyncio.Task | None = None  # Current AI generation task
+    ai_fallback_pool: collections.deque = field(default_factory=collections.deque)  # FIFO fallback tracks
+    ai_fallback_ids: set[str] = field(default_factory=set)  # Track fallback video_ids to avoid duplicates
 
 
 class MusicCog(commands.Cog):
@@ -196,14 +198,24 @@ class MusicCog(commands.Cog):
                     title=item.title
                 )
                 return item
-            else:
-                # AI mode but no autoplay ready yet - wait for AI generation to complete
-                log.debug_cat(
+            if player.ai_fallback_pool:
+                item = player.ai_fallback_pool.popleft()
+                if getattr(item, "video_id", None) in player.ai_fallback_ids:
+                    player.ai_fallback_ids.discard(item.video_id)
+                log.info_cat(
                     Category.DISCOVERY,
-                    "AI mode enabled but no autoplay_next ready - waiting",
-                    guild_id=player.guild_id
+                    "Using AI fallback track",
+                    guild_id=player.guild_id,
+                    title=item.title
                 )
-                return None
+                return item
+
+            # AI mode but no autoplay/fallback ready - fall back to regular discovery
+            log.warning_cat(
+                Category.DISCOVERY,
+                "AI mode fallback exhausted - using regular discovery",
+                guild_id=player.guild_id
+            )
             
         # Regular discovery mode (not AI)
         # Use prefetched discovery song if available
@@ -618,11 +630,15 @@ class MusicCog(commands.Cog):
                 username = member.name if member else "Unknown User"
                 await user_crud.get_or_create(target_user_id, username)
             
+            discovery_source = item.discovery_source or "user_request"
+            if discovery_source in {"ai_autoplay", "ai_alternative"}:
+                discovery_source = "ai_discovery"
+
             # Log play
             history_id = await playback_crud.log_track(
                 session_id=player.session_id,
                 song_id=item.song_db_id,
-                discovery_source=item.discovery_source,
+                discovery_source=discovery_source,
                 discovery_reason=item.discovery_reason,
                 for_user_id=target_user_id
             )
@@ -887,14 +903,19 @@ class MusicCog(commands.Cog):
                 player.skip_votes.clear()
                 player._last_health_check = datetime.now(UTC)
                 
-                # 1. Get next item from queue
+                # 1. Get next item from queue (or AI autoplay when enabled)
                 try:
                     if player.queue.empty():
                         if not player.autoplay:
                             break
-                        await self._fill_queue_if_needed(player)
-                    
-                    item = await asyncio.wait_for(player.queue.get(), timeout=10.0)
+
+                        # AI mode (or autoplay) can supply the next item directly.
+                        item = await self._get_next_item(player)
+                        if item is None:
+                            await asyncio.sleep(1.0)
+                            continue
+                    else:
+                        item = await asyncio.wait_for(player.queue.get(), timeout=10.0)
                 except (asyncio.TimeoutError, asyncio.QueueEmpty):
                     continue
                 except Exception as e:
@@ -1029,6 +1050,15 @@ class MusicCog(commands.Cog):
     async def _fill_queue_if_needed(self, player: GuildPlayer):
         """Fill the queue with discovery songs if it drops below 4 items."""
         if not player.autoplay:
+            return
+        
+        # Skip queue filling in AI mode - AI handles its own autoplay
+        if player.ai_mode_enabled:
+            log.debug_cat(
+                Category.DISCOVERY,
+                "Skipping queue fill - AI mode handles autoplay",
+                guild_id=player.guild_id
+            )
             return
 
         # Get max duration setting
@@ -1187,7 +1217,7 @@ class MusicCog(commands.Cog):
                 all_dislikes.extend(dislikes_list)
             
             # Get recently played tracks
-            recent = await playback_crud.get_recent_playback(player.guild_id, limit=100)
+            recent = await playback_crud.get_recent_history(player.guild_id, limit=100)
             
             # Build exclude list
             exclude_list = []
@@ -1475,7 +1505,7 @@ class MusicCog(commands.Cog):
                     reaction_crud = ReactionCRUD(self.bot.db)
                     
                     # Get recent playback
-                    recent = await playback_crud.get_recent_playback(player.guild_id, limit=100)
+                    recent = await playback_crud.get_recent_history(player.guild_id, limit=100)
                     for r in recent:
                         exclude_list.append({"title": r.get("title", ""), "artist": r.get("artist", "")})
                     
@@ -1573,8 +1603,28 @@ class MusicCog(commands.Cog):
             
             # Update player state
             player.ai_autoplay_next = autoplay_item
-            player.ai_alternatives = alternatives
-            player.ai_generated_at = datetime.now(UTC)
+            has_new_alternatives = bool(alternatives)
+            if has_new_alternatives:
+                player.ai_alternatives = alternatives
+            if has_new_alternatives:
+                player.ai_generated_at = datetime.now(UTC)
+
+            # Keep a rolling fallback pool (max 100 unique tracks).
+            def _add_fallback(item: QueueItem | None) -> None:
+                if not item or not item.video_id:
+                    return
+                if item.video_id in player.ai_fallback_ids:
+                    return
+                while len(player.ai_fallback_pool) >= 100:
+                    old = player.ai_fallback_pool.popleft()
+                    if getattr(old, "video_id", None) in player.ai_fallback_ids:
+                        player.ai_fallback_ids.discard(old.video_id)
+                player.ai_fallback_pool.append(item)
+                player.ai_fallback_ids.add(item.video_id)
+
+            _add_fallback(autoplay_item)
+            for alt in alternatives:
+                _add_fallback(alt)
             
             log.info_cat(
                 Category.API,
@@ -1586,17 +1636,23 @@ class MusicCog(commands.Cog):
             
             # Update the Now Playing message view directly with AI alternatives
             # This is more efficient than triggering a full refresh
-            if player.last_np_msg and alternatives:
+            log.info_cat(
+                Category.SYSTEM,
+                "Attempting to update Now Playing view with AI alternatives",
+                guild_id=player.guild_id,
+                has_message=bool(player.last_np_msg),
+                alternatives_count=len(alternatives)
+            )
+            
+            if player.last_np_msg and has_new_alternatives:
                 try:
-                    # Import NowPlayingView here to avoid circular imports
+                    # Build a full NowPlayingView so control buttons remain.
                     from src.cogs.nowplaying import NowPlayingView
-                    
-                    # Create new view with AI alternatives (no queue items in AI mode)
                     new_view = NowPlayingView(self.bot, queue_items=None, ai_alternatives=alternatives)
-                    
+
                     # Edit the message with the new view (keep existing embed/content)
                     await player.last_np_msg.edit(view=new_view)
-                    
+
                     log.info_cat(
                         Category.SYSTEM,
                         "Updated Now Playing view with AI alternatives",
@@ -1604,9 +1660,22 @@ class MusicCog(commands.Cog):
                         alternatives_count=len(alternatives)
                     )
                 except discord.NotFound:
-                    log.debug_cat(Category.SYSTEM, "Now Playing message not found for view update", guild_id=player.guild_id)
+                    log.info_cat(Category.SYSTEM, "Now Playing message not found for view update", guild_id=player.guild_id)
                 except Exception as e:
-                    log.debug_cat(Category.SYSTEM, "Failed to update Now Playing view", error=str(e), guild_id=player.guild_id)
+                    log.info_cat(Category.SYSTEM, "Failed to update Now Playing view", error=str(e), guild_id=player.guild_id)
+            elif player.last_np_msg and not has_new_alternatives:
+                log.info_cat(
+                    Category.SYSTEM,
+                    "No new AI alternatives; keeping previous dropdown",
+                    guild_id=player.guild_id
+                )
+            else:
+                log.warning_cat(
+                    Category.SYSTEM,
+                    "Cannot update Now Playing view - message missing",
+                    guild_id=player.guild_id,
+                    has_message=bool(player.last_np_msg)
+                )
             
         except asyncio.TimeoutError:
             log.warning_cat(Category.API, "AI generation timeout", guild_id=player.guild_id)
@@ -1924,7 +1993,7 @@ class MusicCog(commands.Cog):
                 group_disliked.extend(dislikes_list)
             
             # Get recent playback to exclude
-            recent_playback = await playback_crud.get_recent_playback(member.guild.id, limit=100)
+            recent_playback = await playback_crud.get_recent_history(member.guild.id, limit=100)
             
             # Build exclude list
             exclude_list = []

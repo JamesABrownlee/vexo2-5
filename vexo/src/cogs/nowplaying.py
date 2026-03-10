@@ -208,9 +208,15 @@ class NowPlayingView(discord.ui.View):
             embed.set_footer(text=f"Action by {display}")
 
             if interaction.response.is_done():
-                await interaction.followup.send(embed=embed, delete_after=delete_after)
+                try:
+                    await interaction.followup.send(embed=embed, delete_after=delete_after)
+                except TypeError:
+                    await interaction.followup.send(embed=embed)
             else:
-                await interaction.response.send_message(embed=embed, delete_after=delete_after)
+                try:
+                    await interaction.response.send_message(embed=embed, delete_after=delete_after)
+                except TypeError:
+                    await interaction.response.send_message(embed=embed)
         except discord.NotFound:
             return
         except Exception as e:
@@ -302,7 +308,7 @@ class NowPlayingView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(emoji="⏸", style=discord.ButtonStyle.secondary, custom_id="np:pause_resume")
+    @discord.ui.button(emoji="⏸", style=discord.ButtonStyle.secondary, custom_id="np:pause_resume", row=1)
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -341,7 +347,7 @@ class NowPlayingView(discord.ui.View):
             await self._set_all_disabled(False, interaction)
             await self._release_np_lock(player)
 
-    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, custom_id="np:stop")
+    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, custom_id="np:stop", row=1)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -389,7 +395,7 @@ class NowPlayingView(discord.ui.View):
             await self._set_all_disabled(True, interaction)
             await self._release_np_lock(player)
 
-    @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.secondary, custom_id="np:skip")
+    @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.secondary, custom_id="np:skip", row=1)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -442,7 +448,7 @@ class NowPlayingView(discord.ui.View):
             await self._set_all_disabled(False, interaction)
             await self._release_np_lock(player)
 
-    @discord.ui.button(emoji="❤️", style=discord.ButtonStyle.secondary, custom_id="np:like")
+    @discord.ui.button(emoji="❤️", style=discord.ButtonStyle.secondary, custom_id="np:like", row=1)
     async def like(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
@@ -495,7 +501,7 @@ class NowPlayingView(discord.ui.View):
             await self._set_all_disabled(False, interaction)
             await self._release_np_lock(player)
 
-    @discord.ui.button(emoji="👎", style=discord.ButtonStyle.secondary, custom_id="np:dislike")
+    @discord.ui.button(emoji="👎", style=discord.ButtonStyle.secondary, custom_id="np:dislike", row=1)
     async def dislike(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,
