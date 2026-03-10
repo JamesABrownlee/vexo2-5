@@ -67,7 +67,9 @@ jobs:
         with:
           context: ./vexo/dashboard
           file: ./vexo/dashboard/Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # Exclude linux/arm/v7 due to Turbo (wasm bindings) incompatibility on that arch.
+          # Building for linux/amd64 and linux/arm64 is sufficient for most targets.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta-dashboard.outputs.tags }}
           labels: ${{ steps.meta-dashboard.outputs.labels }}
