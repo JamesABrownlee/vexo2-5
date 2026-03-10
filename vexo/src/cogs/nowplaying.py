@@ -20,16 +20,17 @@ from discord import app_commands
 from discord.ext import commands
 
 from src.database.crud import SongCRUD, ReactionCRUD, LibraryCRUD, NowPlayingMessageCRUD, GuildCRUD
+from dataclasses import asdict
 from src.utils.logging import get_logger, Category
 
 log = get_logger(__name__)
 
 
 class NowPlayingView(discord.ui.View):
-    """Interactive Now Playing controls with dynamic queue select and AI alternatives."""
+    """Interactive Now Playing controls with dynamic queue select, history, and AI alternatives."""
 
     # Persistent view: timeout must be None and every component needs a custom_id.
-    def __init__(self, bot: commands.Bot, queue_items: list = None, ai_alternatives: list = None):
+    def __init__(self, bot: commands.Bot, queue_items: list = None, ai_alternatives: list = None, recent_history: list = None, current_item=None):
         super().__init__(timeout=None)
         self.bot = bot
 
@@ -39,6 +40,42 @@ class NowPlayingView(discord.ui.View):
             queue_items_count=len(queue_items) if queue_items else 0,
             ai_alternatives_count=len(ai_alternatives) if ai_alternatives else 0
         )
+
+        # History selector: show replay current + recent previous tracks (most-recent first)
+        try:
+            history_opts = []
+            if current_item:
+                history_opts.append(
+                    discord.SelectOption(
+                        label=f"🔁 Replay current: {current_item.title[:45]}",
+                        description=(current_item.artist[:70] if getattr(current_item, 'artist', None) else ''),
+                        value="current",
+                    )
+                )
+            if recent_history:
+                for i, h in enumerate(recent_history[:10]):
+                    history_opts.append(
+                        discord.SelectOption(
+                            label=f"{i+1}. {h.title[:45]}",
+                            description=(h.artist[:70] if getattr(h, 'artist', None) else ''),
+                            value=f"prev:{i}",
+                        )
+                    )
+
+            if history_opts:
+                history_select = discord.ui.Select(
+                    placeholder="🔁 Replay / Previous tracks...",
+                    custom_id="np:history",
+                    options=history_opts,
+                    min_values=1,
+                    max_values=1,
+                    row=1,
+                )
+                history_select.callback = self.history_callback
+                # Add history select first so it's visible above others
+                self.add_item(history_select)
+        except Exception:
+            pass
 
         # AI MODE: Show only AI alternatives dropdown
         if ai_alternatives:
@@ -685,6 +722,106 @@ class NowPlayingView(discord.ui.View):
             await self._set_all_disabled(False, interaction)
             await self._release_np_lock(player)
 
+    async def history_callback(self, interaction: discord.Interaction):
+        """User selected replay current or a previous track from the history dropdown."""
+        with log.span(
+            Category.USER,
+            "np_select_history",
+            module=__name__,
+            view="NowPlayingView",
+            custom_id="np:history",
+            interaction_id=getattr(interaction, "id", None),
+            guild_id=interaction.guild_id,
+            user_id=getattr(interaction.user, "id", None),
+        ):
+            if not await self._safe_defer(interaction, ephemeral=True):
+                return
+        player, guild_id = await self._guard_player_and_message(interaction)
+        if not player:
+            return
+
+        if not await self._try_acquire_np_lock(interaction, player):
+            return
+
+        try:
+            await self._set_all_disabled(True, interaction)
+
+            values = interaction.data.get("values") if isinstance(interaction.data, dict) else None
+            if not values or len(values) == 0:
+                await self._safe_send(interaction, "❌ No selection provided.", ephemeral=True)
+                return
+
+            selected_value = values[0]
+
+            # Local import to avoid circular module import at top-level
+            from src.cogs.music import QueueItem
+
+            if selected_value == "current":
+                if not player.current:
+                    await self._safe_send(interaction, "❌ No current track to replay.", ephemeral=True)
+                    return
+                src = player.current
+                clone = QueueItem(
+                    video_id=src.video_id,
+                    title=src.title,
+                    artist=src.artist,
+                    url=None,
+                    requester_id=src.requester_id,
+                    discovery_source=src.discovery_source,
+                    discovery_reason=src.discovery_reason,
+                    for_user_id=src.for_user_id,
+                    song_db_id=src.song_db_id,
+                    duration_seconds=src.duration_seconds,
+                    genre=src.genre,
+                    year=src.year,
+                )
+                # Enqueue at tail
+                player.queue.put_nowait(clone)
+                await self._safe_toast(interaction, f"🔁 Queued **{clone.title}** to play again after the queue")
+                log.info_cat(Category.USER, "history_replay_enqueued", guild_id=guild_id, user_id=interaction.user.id, title=clone.title, artist=clone.artist)
+                return
+
+            if selected_value.startswith("prev:"):
+                try:
+                    idx = int(selected_value.split(":", 1)[1])
+                except Exception:
+                    await self._safe_send(interaction, "❌ Invalid selection index.", ephemeral=True)
+                    return
+                hist = getattr(player, "recent_history", None)
+                if not hist or idx < 0 or idx >= len(hist):
+                    await self._safe_send(interaction, "❌ Previous track not found.", ephemeral=True)
+                    return
+                # recent_history is most-recent first
+                src = list(hist)[idx]
+                clone = QueueItem(
+                    video_id=src.video_id,
+                    title=src.title,
+                    artist=src.artist,
+                    url=None,
+                    requester_id=src.requester_id,
+                    discovery_source=src.discovery_source,
+                    discovery_reason=src.discovery_reason,
+                    for_user_id=src.for_user_id,
+                    song_db_id=src.song_db_id,
+                    duration_seconds=src.duration_seconds,
+                    genre=src.genre,
+                    year=src.year,
+                )
+                # Insert at front so it becomes next
+                player.queue.put_at_front(clone)
+                await self._safe_toast(interaction, f"⏭️ Queued next **{clone.title}** by {clone.artist}")
+                log.info_cat(Category.USER, "history_prev_queued_next", guild_id=guild_id, user_id=interaction.user.id, title=clone.title, artist=clone.artist)
+                return
+
+            await self._safe_send(interaction, "❌ Unknown selection.", ephemeral=True)
+
+        except Exception as e:
+            log.exception_cat(Category.SYSTEM, "NowPlayingView history selection failed", error=str(e))
+            await self._safe_send(interaction, "❌ Error selecting history item.", ephemeral=True)
+        finally:
+            await self._set_all_disabled(False, interaction)
+            await self._release_np_lock(player)
+
 
 class NowPlayingCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -1009,7 +1146,7 @@ class NowPlayingCog(commands.Cog):
                 count=len(ai_alternatives)
             )
         
-        view = NowPlayingView(self.bot, queue_items=queue_items, ai_alternatives=ai_alternatives)
+        view = NowPlayingView(self.bot, queue_items=queue_items, ai_alternatives=ai_alternatives, recent_history=list(player.recent_history) if getattr(player, 'recent_history', None) else None, current_item=item)
 
         loading_embed = discord.Embed(
             title="🎵 Now Playing",
@@ -1337,7 +1474,7 @@ class NowPlayingCog(commands.Cog):
 
         # Updated view (queue may have changed)
         queue_items = list(player.queue._queue)[:10]
-        view = NowPlayingView(self.bot, queue_items=queue_items)
+        view = NowPlayingView(self.bot, queue_items=queue_items, recent_history=list(player.recent_history) if getattr(player, 'recent_history', None) else None, current_item=player.current)
 
         try:
             async with aiohttp.ClientSession() as session:

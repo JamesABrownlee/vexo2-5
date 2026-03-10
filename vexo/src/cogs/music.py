@@ -4,7 +4,7 @@ import time
 import collections
 import random
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, UTC
 from typing import Optional
 from urllib.parse import urlparse
@@ -123,6 +123,8 @@ class GuildPlayer:
     _ai_generation_task: asyncio.Task | None = None  # Current AI generation task
     ai_fallback_pool: collections.deque = field(default_factory=collections.deque)  # FIFO fallback tracks
     ai_fallback_ids: set[str] = field(default_factory=set)  # Track fallback video_ids to avoid duplicates
+    # Recent playback history (most-recent first). Stores QueueItem copies of previously played tracks.
+    recent_history: collections.deque = field(default_factory=lambda: collections.deque(maxlen=10))
 
 
 class MusicCog(commands.Cog):
@@ -1029,6 +1031,32 @@ class MusicCog(commands.Cog):
                     log.event(Category.PLAYBACK, Event.PLAYBACK_ERROR, level=logging.ERROR, title=item.title, error=str(e))
                     continue
                 finally:
+                    # Append the outgoing item to recent history (most-recent first)
+                    try:
+                        if item:
+                            try:
+                                # Create a lightweight copy to avoid mutating the historical record
+                                hist = QueueItem(
+                                    video_id=item.video_id,
+                                    title=item.title,
+                                    artist=item.artist,
+                                    url=None,
+                                    requester_id=item.requester_id,
+                                    discovery_source=item.discovery_source,
+                                    discovery_reason=item.discovery_reason,
+                                    for_user_id=item.for_user_id,
+                                    song_db_id=item.song_db_id,
+                                    duration_seconds=item.duration_seconds,
+                                    genre=item.genre,
+                                    year=item.year,
+                                )
+                                # Keep most-recent first ordering
+                                if hasattr(player, "recent_history"):
+                                    player.recent_history.appendleft(hist)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     player.current = None
                     player._current_source = None
                     player._current_stream_info = None
