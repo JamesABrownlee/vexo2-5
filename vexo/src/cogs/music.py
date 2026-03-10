@@ -1562,7 +1562,7 @@ class MusicCog(commands.Cog):
                     exclude_list=exclude_list,
                     n_alternatives=9,
                 ),
-                timeout=25.0  # Strict timeout
+                timeout=60.0  # Increased timeout to allow slower local models
             )
             
             if not ai_result:

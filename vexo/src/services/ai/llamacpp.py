@@ -28,29 +28,23 @@ class LlamaCppClient(BaseAIClient):
     provider_name = "llamacpp"
 
     SYSTEM_PROMPT = (
-        "You are a music recommendation service. "
-        "Return only valid JSON. "
-        "Do not include reasoning. "
-        "Do not include explanations. "
-        "Do not include markdown. "
-        "Do not include code fences. "
-        "Do not include <think> tags. "
-        "Do not output any text before or after the JSON."
+        "You are a music recommendation service."
+        " STRICTLY return only a single valid JSON object as the entire response — nothing else."
+        " Do NOT include any explanation, commentary, markdown, code fences, or analysis."
+        " Do NOT output any text before or after the JSON."
+        " If you cannot produce valid JSON exactly as requested, output exactly this JSON: {\"error\":\"unable_to_comply\"}"
     )
     PLAY_MODE_SYSTEM_PROMPT = (
-        "You are a music recommendation service. "
-        "Return only valid JSON with exactly two top-level keys: \"autoplay_next\" and \"alternatives\". "
-        "\"autoplay_next\" must be an object with keys: \"title\", \"artist\", \"reason\". "
-        "\"alternatives\" must be an array of objects, each with keys: \"title\", \"artist\", \"reason\". "
-        "Do not include reasoning. "
-        "Do not include explanations. "
-        "Do not include markdown. "
-        "Do not include code fences. "
-        "Do not include <think> tags. "
-        "Do not output any text before or after the JSON."
+        "You are a music recommendation service."
+        " STRICTLY return only a single valid JSON object with exactly two top-level keys: \"autoplay_next\" and \"alternatives\" — nothing else."
+        " The \"autoplay_next\" value must be an object with keys: \"title\", \"artist\", \"reason\"."
+        " The \"alternatives\" value must be an array of objects, each with keys: \"title\", \"artist\", \"reason\"."
+        " Do NOT include any explanation, commentary, markdown, code fences, or analysis."
+        " Do NOT output any text before or after the JSON."
+        " If you cannot produce valid JSON exactly as requested, output exactly this JSON: {\"error\":\"unable_to_comply\"}"
     )
 
-    def __init__(self, base_url: str = "http://localhost:8080", model: str = "", bearer_token: Optional[str] = None, health_cache_ttl: int = 45, request_timeout: int = 25):
+    def __init__(self, base_url: str = "http://localhost:8080", model: str = "", bearer_token: Optional[str] = None, health_cache_ttl: int = 45, request_timeout: int = 60):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.bearer_token = bearer_token
@@ -322,8 +316,8 @@ class LlamaCppClient(BaseAIClient):
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 640,
-            "temperature": 0.7,
+            "max_tokens": 1024,
+            "temperature": 0.0,
             "stream": False,
         }
 
@@ -392,8 +386,8 @@ class LlamaCppClient(BaseAIClient):
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 640,
-            "temperature": 0.7,
+            "max_tokens": 1024,
+            "temperature": 0.0,
             "stream": False,
         }
         data = await self._post_openai(payload)
@@ -458,8 +452,8 @@ class LlamaCppClient(BaseAIClient):
                 {"role": "system", "content": self.PLAY_MODE_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 768,
-            "temperature": 0.7,
+            "max_tokens": 1536,
+            "temperature": 0.0,
             "stream": False,
         }
         data = await self._post_openai(payload)
