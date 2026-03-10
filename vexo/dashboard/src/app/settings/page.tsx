@@ -1,7 +1,7 @@
 'use client';
 
 import { Settings as SettingsIcon, Save, Globe, Volume2, Sparkles, Shield, Brain } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 interface SettingToggle {
     id: string;
@@ -48,7 +48,7 @@ export default function SettingsPage() {
         {
             id: 'ai_discovery_enabled',
             label: 'AI-Powered Discovery',
-            description: 'Use AI to suggest songs based on user preferences (requires Ollama)',
+            description: 'Use Local AI to suggest songs based on user preferences',
             enabled: false,
         },
         {
@@ -58,6 +58,16 @@ export default function SettingsPage() {
             enabled: false,
         },
     ]);
+
+    const [aiStatus, setAiStatus] = useState<any>(null);
+
+    useEffect(() => {
+        // Fetch AI provider status from backend
+        fetch('/api/services/ai/status')
+            .then(r => r.json())
+            .then(setAiStatus)
+            .catch(() => setAiStatus(null));
+    }, []);
 
     const [defaultVolume, setDefaultVolume] = useState(50);
     const [discoveryChance, setDiscoveryChance] = useState(70);
@@ -151,8 +161,26 @@ export default function SettingsPage() {
                 <div className="mt-4 p-3 rounded-xl bg-violet-500/10 border border-violet-500/20">
                     <p className="text-xs text-violet-300">
                         <strong>New:</strong> Use <code className="px-1 py-0.5 rounded bg-violet-500/20">/play ai &lt;song&gt;</code> to queue a seed song with AI-generated follow-ups.
-                        AI discovery will automatically activate when enabled and Ollama is available.
                     </p>
+
+                    <div className="mt-3">
+                        <label className="text-xs text-zinc-400">Local AI Provider</label>
+                        <div className="mt-2 flex items-center gap-2">
+                            <button className={`px-3 py-1 rounded ${aiStatus?.providers?.ollama?.available ? 'bg-violet-500 text-white' : 'bg-zinc-700 text-zinc-400'}`} disabled={!aiStatus?.providers?.ollama?.available}>
+                                Ollama {aiStatus?.providers?.ollama?.available ? '(Available)' : '(Unavailable)'}
+                            </button>
+                            <button className={`px-3 py-1 rounded ${aiStatus?.providers?.llamacpp?.available ? 'bg-violet-500 text-white' : 'bg-zinc-700 text-zinc-400'}`} disabled={!aiStatus?.providers?.llamacpp?.available}>
+                                llama.cpp {aiStatus?.providers?.llamacpp?.available ? '(Available)' : '(Unavailable)'}
+                            </button>
+                        </div>
+
+                        {aiStatus && !aiStatus.ai_available && (
+                            <p className="text-xs text-red-400 mt-2">AI is not available. Neither Ollama nor llama.cpp responded.</p>
+                        )}
+                        {aiStatus && aiStatus.message && (
+                            <p className="text-xs text-zinc-300 mt-2">{aiStatus.message}</p>
+                        )}
+                    </div>
                 </div>
             </div>
 

@@ -44,6 +44,13 @@ class Config:
     OLLAMA_BASE_URL: str
     OLLAMA_MODEL: str
     OLLAMA_TOKEN: str | None
+    # Local AI provider config (supports 'ollama' and 'llamacpp')
+    LOCAL_AI_ENABLED: bool
+    LOCAL_AI_PROVIDER: str | None
+    LOCAL_AI_MODEL: str | None
+    LLAMACPP_BASE_URL: str | None
+    LLAMACPP_MODEL: str | None
+    LLAMACPP_TOKEN: str | None
 
     # Optional: OAuth scaffolding for dashboard auth
     DISCORD_OAUTH_CLIENT_ID: str | None
@@ -92,6 +99,13 @@ class Config:
             OLLAMA_BASE_URL=os.getenv("OLLAMA_BASE_URL", "https://ollama.plingindigo.org"),
             OLLAMA_MODEL=os.getenv("OLLAMA_MODEL", "llama3"),
             OLLAMA_TOKEN=os.getenv("OLLAMA_TOKEN"),
+            # Local AI configuration (backwards compatible with existing OLLAMA_* vars)
+            LOCAL_AI_ENABLED=_bool_env("LOCAL_AI_ENABLED", False),
+            LOCAL_AI_PROVIDER=os.getenv("LOCAL_AI_PROVIDER"),
+            LOCAL_AI_MODEL=os.getenv("LOCAL_AI_MODEL"),
+            LLAMACPP_BASE_URL=os.getenv("LLAMACPP_BASE_URL"),
+            LLAMACPP_MODEL=os.getenv("LLAMACPP_MODEL"),
+            LLAMACPP_TOKEN=os.getenv("LLAMACPP_TOKEN"),
             DISCORD_OAUTH_CLIENT_ID=os.getenv("DISCORD_OAUTH_CLIENT_ID"),
             DISCORD_OAUTH_CLIENT_SECRET=os.getenv("DISCORD_OAUTH_CLIENT_SECRET"),
             DISCORD_OAUTH_REDIRECT_URI=os.getenv("DISCORD_OAUTH_REDIRECT_URI"),

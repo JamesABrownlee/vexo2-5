@@ -37,6 +37,7 @@ class AIPlayModeResult:
 
 
 class OllamaClient:
+    provider_name = "ollama"
     """Async Ollama client for AI-powered music discovery."""
     
     def __init__(

@@ -201,6 +201,8 @@ class DashboardCog(commands.Cog):
         # Service management
         self.app.router.add_get("/api/services", self._handle_services_list)
         self.app.router.add_post("/api/services/{service_id}/restart", self._handle_service_restart)
+        # Local AI provider status
+        self.app.router.add_get("/api/services/ai/status", self._handle_ai_status)
 
     @staticmethod
     def _utc_now() -> datetime:
@@ -1257,7 +1259,31 @@ class DashboardCog(commands.Cog):
             return web.json_response({"status": "ok"})
         else:
             limit = await crud.get_global_setting("max_concurrent_servers")
-            return web.json_response({"max_concurrent_servers": limit})
+            # Also include Local AI global settings if present
+            ai_enabled = await crud.get_global_setting("LOCAL_AI_ENABLED")
+            ai_provider = await crud.get_global_setting("LOCAL_AI_PROVIDER")
+            return web.json_response({"max_concurrent_servers": limit, "LOCAL_AI_ENABLED": ai_enabled, "LOCAL_AI_PROVIDER": ai_provider})
+
+    async def _handle_ai_status(self, request: web.Request) -> web.Response:
+        """Return Local AI backend availability and selected provider information."""
+        # Use factory to probe providers
+        try:
+            from src.services.ai.factory import AIClientFactory
+            factory = AIClientFactory()
+            status = await factory.status()
+            # Merge persisted preference from global settings if available
+            if hasattr(self.bot, "db") and self.bot.db:
+                from src.database.crud import SystemCRUD
+                crud = SystemCRUD(self.bot.db)
+                pref = await crud.get_global_setting("LOCAL_AI_PROVIDER")
+                enabled = await crud.get_global_setting("LOCAL_AI_ENABLED")
+                if pref is not None:
+                    status["selected_provider"] = pref
+                if enabled is not None:
+                    status["ai_enabled"] = bool(enabled)
+            return web.json_response(status)
+        except Exception as e:
+            return web.json_response({"error": "failed", "message": str(e)}, status=500)
 
     async def _handle_notifications(self, request: web.Request) -> web.Response:
         """Get notifications."""

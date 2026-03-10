@@ -290,16 +290,24 @@ class MusicBot(commands.Bot):
         from src.services.normalizer import SongNormalizer
         from src.services.discovery import DiscoveryEngine
         from src.services.preferences import PreferenceManager
-        from src.services.ollama_client import OllamaClient
+        # AI provider factory: provides a local ai client (ollama or llamacpp)
+        from src.services.ai.factory import AIClientFactory
         
         self.youtube = YouTubeService(config.YTDL_COOKIES_PATH, config.YTDL_PO_TOKEN)
         self.spotify = SpotifyService(config.SPOTIFY_CLIENT_ID, config.SPOTIFY_CLIENT_SECRET)
         self.normalizer = SongNormalizer(self.youtube)
-        self.ollama = OllamaClient(
-            base_url=config.OLLAMA_BASE_URL,
-            model=config.OLLAMA_MODEL,
-            bearer_token=config.OLLAMA_TOKEN
-        )
+        # Instantiate provider factory and resolve an ai client instance.
+        self._ai_factory = AIClientFactory()
+        # `ai_client` is the primary entrypoint for AI operations.
+        self.ai_client = await self._ai_factory.get_for_config()
+        # Keep backwards-compatible attribute for existing code paths.
+        # New code should use `self.ai_client`.
+        self.ollama = self.ai_client
+        # Store last-known provider status summary for quick dashboard access
+        try:
+            self.ai_provider_status = await self._ai_factory.status()
+        except Exception:
+            self.ai_provider_status = None
         
         
         # Initialize CRUD helpers
