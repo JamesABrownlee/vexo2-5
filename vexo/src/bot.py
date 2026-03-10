@@ -300,9 +300,7 @@ class MusicBot(commands.Bot):
         self._ai_factory = AIClientFactory()
         # `ai_client` is the primary entrypoint for AI operations.
         self.ai_client = await self._ai_factory.get_for_config()
-        # Keep backwards-compatible attribute for existing code paths.
-        # New code should use `self.ai_client`.
-        self.ollama = self.ai_client
+        # New code should use `self.ai_client` as the canonical Local AI client.
         # Store last-known provider status summary for quick dashboard access
         try:
             self.ai_provider_status = await self._ai_factory.status()

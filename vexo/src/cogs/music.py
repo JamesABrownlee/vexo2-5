@@ -1112,9 +1112,9 @@ class MusicCog(commands.Cog):
                 ai_enabled = await guild_crud.get_setting(player.guild_id, "ai_discovery_enabled")
                 
                 if ai_enabled:
-                    ollama_client = getattr(self.bot, "ollama", None)
-                    if ollama_client:
-                        ai_available = await ollama_client.health_check()
+                    ai_client = getattr(self.bot, "ai_client", None)
+                    if ai_client:
+                        ai_available = await ai_client.health_check()
                         if ai_available:
                             # Try AI discovery
                             ai_item = await self._get_ai_discovery_song(player, voice_members)
@@ -1183,8 +1183,8 @@ class MusicCog(commands.Cog):
         if not voice_members or not hasattr(self.bot, "db") or not self.bot.db:
             return None
         
-        ollama_client = getattr(self.bot, "ollama", None)
-        if not ollama_client:
+        ai_client = getattr(self.bot, "ai_client", None)
+        if not ai_client:
             return None
         
         try:
@@ -1248,7 +1248,7 @@ class MusicCog(commands.Cog):
             # Get AI suggestions
             if seed_track and liked_tracks:
                 # Use hybrid: seed + user preferences
-                suggestions = await ollama_client.suggest_for_user(
+                suggestions = await ai_client.suggest_for_user(
                     liked_tracks=[{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks],
                     disliked_tracks=[],  # Already in exclude_list
                     group_disliked_tracks=[],  # Already in exclude_list
@@ -1257,14 +1257,14 @@ class MusicCog(commands.Cog):
                 )
             elif seed_track:
                 # Use seed-based
-                suggestions = await ollama_client.suggest_from_seed(
+                suggestions = await ai_client.suggest_from_seed(
                     seed_track=seed_track,
                     exclude_list=exclude_list,
                     n_candidates=20
                 )
             elif liked_tracks:
                 # Use user preferences only
-                suggestions = await ollama_client.suggest_for_user(
+                suggestions = await ai_client.suggest_for_user(
                     liked_tracks=[{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks],
                     disliked_tracks=[],
                     group_disliked_tracks=[],
@@ -1332,13 +1332,13 @@ class MusicCog(commands.Cog):
                         log.error_cat(Category.DATABASE, "Failed to persist AI autoplay suggestion", error=str(e))
                     
                     # Return the first valid track
-                    log.info_cat(
-                        Category.DISCOVERY,
-                        "AI discovery found track",
-                        title=track.title,
-                        artist=track.artist,
-                        for_user_id=target_user_id
-                    )
+                            log.info_cat(
+                                Category.DISCOVERY,
+                                "AI discovery found track",
+                                title=track.title,
+                                artist=track.artist,
+                                for_user_id=target_user_id
+                            )
                     
                     return QueueItem(
                         video_id=track.video_id,
@@ -1485,12 +1485,12 @@ class MusicCog(commands.Cog):
         if not player.ai_mode_enabled:
             return
         
-        ollama_client = getattr(self.bot, "ollama", None)
-        if not ollama_client:
+        ai_client = getattr(self.bot, "ai_client", None)
+        if not ai_client:
             return
         
         # Check if AI is available
-        ai_available = await ollama_client.health_check()
+        ai_available = await ai_client.health_check()
         if not ai_available:
             log.warning_cat(Category.API, "AI unavailable, skipping generation", guild_id=player.guild_id)
             return
@@ -1529,7 +1529,7 @@ class MusicCog(commands.Cog):
             
             # Call AI with timeout
             ai_result = await asyncio.wait_for(
-                ollama_client.suggest_for_play_mode(
+                ai_client.suggest_for_play_mode(
                     seed_track=seed_metadata,
                     exclude_list=exclude_list,
                     n_alternatives=5
@@ -1956,12 +1956,12 @@ class MusicCog(commands.Cog):
         except Exception:
             return
         
-        # Check if Ollama is available
-        ollama_client = getattr(self.bot, "ollama", None)
-        if not ollama_client:
+        # Check if Local AI provider is available
+        ai_client = getattr(self.bot, "ai_client", None)
+        if not ai_client:
             return
         
-        ai_available = await ollama_client.health_check()
+        ai_available = await ai_client.health_check()
         if not ai_available:
             log.debug_cat(
                 Category.API,
