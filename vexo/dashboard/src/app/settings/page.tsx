@@ -63,7 +63,36 @@ export default function SettingsPage() {
     const [aiEnabled, setAiEnabled] = useState<boolean>(false);
     const [saving, setSaving] = useState<boolean>(false);
 
-    const [aiStatus, setAiStatus] = useState<any>(null);
+    interface AIProviderInfo {
+        available?: boolean;
+        label?: string;
+    }
+
+    interface AIStatus {
+        ai_enabled?: boolean;
+        ai_available?: boolean;
+        preferred_provider?: string | null;
+        selected_provider?: string | null;
+        message?: string | null;
+        providers?: {
+            ollama?: AIProviderInfo;
+            llamacpp?: AIProviderInfo;
+            [key: string]: AIProviderInfo | undefined;
+        };
+    }
+
+    interface GlobalSettings {
+        LOCAL_AI_ENABLED?: boolean;
+        LOCAL_AI_PROVIDER?: string | null;
+        [key: string]: any;
+    }
+
+    interface SettingsPayload {
+        LOCAL_AI_ENABLED: boolean;
+        LOCAL_AI_PROVIDER: string | null;
+    }
+
+    const [aiStatus, setAiStatus] = useState<AIStatus | null>(null);
 
     useEffect(() => {
         // Fetch AI provider status and persisted settings from backend
@@ -77,7 +106,7 @@ export default function SettingsPage() {
                 const statusJson = statusRes.ok ? await statusRes.json() : null;
                 const settingsJson = settingsRes.ok ? await settingsRes.json() : null;
 
-                setAiStatus(statusJson);
+                setAiStatus(statusJson as AIStatus | null);
 
                 // Determine initial preferred and enabled values.
                 if (settingsJson && typeof settingsJson.LOCAL_AI_ENABLED !== 'undefined') {
@@ -103,7 +132,7 @@ export default function SettingsPage() {
         setAiSettings(prev => prev.map(s => s.id === 'ai_discovery_enabled' ? { ...s, enabled: aiEnabled } : s));
     }, [aiEnabled]);
 
-    async function handleSelectProvider(key: string) {
+    function handleSelectProvider(key: string) {
         // allow selecting unavailable provider as preferred; save on demand
         setPreferredProvider(key);
     }
@@ -112,8 +141,7 @@ export default function SettingsPage() {
         setSaving(true);
         try {
             // Persist preferred provider and ai enabled state
-            const payload: any = { LOCAL_AI_PROVIDER: preferredProvider };
-            payload.LOCAL_AI_ENABLED = aiEnabled;
+            const payload: SettingsPayload = { LOCAL_AI_PROVIDER: preferredProvider, LOCAL_AI_ENABLED: aiEnabled };
             await postSettings(payload);
             // Refresh persisted settings and runtime status
             const [settingsRes, statusRes] = await Promise.all([fetch('/api/settings/global'), fetch('/api/services/ai/status')]);
@@ -122,7 +150,7 @@ export default function SettingsPage() {
                 if (typeof sj.LOCAL_AI_ENABLED !== 'undefined') setAiEnabled(Boolean(sj.LOCAL_AI_ENABLED));
                 if (sj.LOCAL_AI_PROVIDER) setPreferredProvider(String(sj.LOCAL_AI_PROVIDER));
             }
-            if (statusRes.ok) setAiStatus(await statusRes.json());
+            if (statusRes.ok) setAiStatus((await statusRes.json()) as AIStatus);
         } catch (e) {
             // ignore for now
         } finally {
@@ -150,11 +178,7 @@ export default function SettingsPage() {
         );
     };
 
-    const toggleAiSetting = (id: string) => {
-        setAiSettings(prev =>
-            prev.map(s => (s.id === id ? { ...s, enabled: !s.enabled } : s))
-        );
-    };
+    // duplicate removed: `toggleAiSetting` defined once above
 
     return (
         <div className="space-y-6 max-w-3xl">
@@ -351,7 +375,7 @@ export default function SettingsPage() {
     );
 }
 
-async function postSettings(data: any) {
+async function postSettings(data: SettingsPayload) {
     return fetch('/api/settings/global', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
