@@ -59,15 +59,66 @@ export default function SettingsPage() {
         },
     ]);
 
+    const [preferredProvider, setPreferredProvider] = useState<string | null>(null);
+    const [aiEnabled, setAiEnabled] = useState<boolean>(false);
+    const [saving, setSaving] = useState<boolean>(false);
+
     const [aiStatus, setAiStatus] = useState<any>(null);
 
     useEffect(() => {
-        // Fetch AI provider status from backend
-        fetch('/api/services/ai/status')
-            .then(r => r.json())
-            .then(setAiStatus)
-            .catch(() => setAiStatus(null));
+        // Fetch AI provider status and persisted settings from backend
+        async function load() {
+            try {
+                const [statusRes, settingsRes] = await Promise.all([
+                    fetch('/api/services/ai/status'),
+                    fetch('/api/settings/global')
+                ]);
+
+                const statusJson = statusRes.ok ? await statusRes.json() : null;
+                const settingsJson = settingsRes.ok ? await settingsRes.json() : null;
+
+                setAiStatus(statusJson);
+
+                if (settingsJson) {
+                    // persisted settings expose LOCAL_AI_ENABLED and LOCAL_AI_PROVIDER
+                    setAiEnabled(Boolean(settingsJson.LOCAL_AI_ENABLED));
+                    if (settingsJson.LOCAL_AI_PROVIDER) {
+                        setPreferredProvider(String(settingsJson.LOCAL_AI_PROVIDER));
+                    }
+                }
+            } catch (e) {
+                setAiStatus(null);
+            }
+        }
+        load();
     }, []);
+
+    useEffect(() => {
+        // Reflect persisted aiEnabled into aiSettings toggle
+        setAiSettings(prev => prev.map(s => s.id === 'ai_discovery_enabled' ? { ...s, enabled: aiEnabled } : s));
+    }, [aiEnabled]);
+
+    async function handleSelectProvider(key: string) {
+        // allow selecting unavailable provider as preferred; save on demand
+        setPreferredProvider(key);
+    }
+
+    async function handleSavePreferences() {
+        setSaving(true);
+        try {
+            // Persist preferred provider and ai enabled state
+            const payload: any = { LOCAL_AI_PROVIDER: preferredProvider };
+            payload.LOCAL_AI_ENABLED = aiEnabled;
+            await postSettings(payload);
+            // Refresh status
+            const res = await fetch('/api/services/ai/status');
+            if (res.ok) setAiStatus(await res.json());
+        } catch (e) {
+            // ignore for now
+        } finally {
+            setSaving(false);
+        }
+    }
 
     const [defaultVolume, setDefaultVolume] = useState(50);
     const [discoveryChance, setDiscoveryChance] = useState(70);
@@ -163,24 +214,42 @@ export default function SettingsPage() {
                         <strong>New:</strong> Use <code className="px-1 py-0.5 rounded bg-violet-500/20">/play ai &lt;song&gt;</code> to queue a seed song with AI-generated follow-ups.
                     </p>
 
-                    <div className="mt-3">
-                        <label className="text-xs text-zinc-400">Local AI Provider</label>
-                        <div className="mt-2 flex items-center gap-2">
-                            <button className={`px-3 py-1 rounded ${aiStatus?.providers?.ollama?.available ? 'bg-violet-500 text-white' : 'bg-zinc-700 text-zinc-400'}`} disabled={!aiStatus?.providers?.ollama?.available}>
-                                Ollama {aiStatus?.providers?.ollama?.available ? '(Available)' : '(Unavailable)'}
-                            </button>
-                            <button className={`px-3 py-1 rounded ${aiStatus?.providers?.llamacpp?.available ? 'bg-violet-500 text-white' : 'bg-zinc-700 text-zinc-400'}`} disabled={!aiStatus?.providers?.llamacpp?.available}>
-                                llama.cpp {aiStatus?.providers?.llamacpp?.available ? '(Available)' : '(Unavailable)'}
-                            </button>
-                        </div>
+                        <div className="mt-3">
+                            <label className="text-xs text-zinc-400">Local AI Provider</label>
+                            <div className="mt-2 flex items-center gap-2">
+                                <button
+                                    onClick={() => handleSelectProvider('ollama')}
+                                    className={`px-3 py-1 rounded ${preferredProvider === 'ollama' ? 'ring-2 ring-violet-400' : ''} ${aiStatus?.providers?.ollama?.available ? 'bg-violet-600 text-white' : 'bg-zinc-700 text-zinc-400'}`}
+                                >
+                                    Ollama {aiStatus?.providers?.ollama?.available ? '(Available)' : '(Unavailable)'}
+                                </button>
+                                <button
+                                    onClick={() => handleSelectProvider('llamacpp')}
+                                    className={`px-3 py-1 rounded ${preferredProvider === 'llamacpp' ? 'ring-2 ring-violet-400' : ''} ${aiStatus?.providers?.llamacpp?.available ? 'bg-violet-600 text-white' : 'bg-zinc-700 text-zinc-400'}`}
+                                >
+                                    llama.cpp {aiStatus?.providers?.llamacpp?.available ? '(Available)' : '(Unavailable)'}
+                                </button>
+                                <button
+                                    onClick={handleSavePreferences}
+                                    className={`ml-4 px-3 py-1 rounded bg-violet-500 text-white ${saving ? 'opacity-60' : ''}`}
+                                    disabled={saving}
+                                >
+                                    Save
+                                </button>
+                            </div>
 
-                        {aiStatus && !aiStatus.ai_available && (
-                            <p className="text-xs text-red-400 mt-2">AI is not available. Neither Ollama nor llama.cpp responded.</p>
-                        )}
-                        {aiStatus && aiStatus.message && (
-                            <p className="text-xs text-zinc-300 mt-2">{aiStatus.message}</p>
-                        )}
-                    </div>
+                            {aiStatus && !aiStatus.ai_available && (
+                                <p className="text-xs text-red-400 mt-2">AI is not available. Neither Ollama nor llama.cpp responded.</p>
+                            )}
+
+                            {aiStatus && (
+                                <div className="text-xs text-zinc-300 mt-2">
+                                    <div>Active: {aiStatus.selected_provider ?? 'none'}</div>
+                                    <div>Preferred: {preferredProvider ?? 'none'}</div>
+                                    {aiStatus.message && <div>{aiStatus.message}</div>}
+                                </div>
+                            )}
+                        </div>
                 </div>
             </div>
 
@@ -259,4 +328,12 @@ export default function SettingsPage() {
             </div>
         </div>
     );
+}
+
+async function postSettings(data: any) {
+    return fetch('/api/settings/global', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+    });
 }

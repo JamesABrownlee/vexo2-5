@@ -1277,10 +1277,10 @@ class DashboardCog(commands.Cog):
                 crud = SystemCRUD(self.bot.db)
                 pref = await crud.get_global_setting("LOCAL_AI_PROVIDER")
                 enabled = await crud.get_global_setting("LOCAL_AI_ENABLED")
-                if pref is not None:
-                    status["selected_provider"] = pref
-                if enabled is not None:
-                    status["ai_enabled"] = bool(enabled)
+                    if pref is not None:
+                        status["preferred_provider"] = pref
+                    if enabled is not None:
+                        status["ai_enabled"] = bool(enabled)
             return web.json_response(status)
         except Exception as e:
             return web.json_response({"error": "failed", "message": str(e)}, status=500)
