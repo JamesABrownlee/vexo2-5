@@ -1271,17 +1271,55 @@ class DashboardCog(commands.Cog):
             from src.services.ai.factory import AIClientFactory
             factory = AIClientFactory()
             status = await factory.status()
+
             # Merge persisted preference from global settings if available
             if hasattr(self.bot, "db") and self.bot.db:
                 from src.database.crud import SystemCRUD
                 crud = SystemCRUD(self.bot.db)
                 pref = await crud.get_global_setting("LOCAL_AI_PROVIDER")
                 enabled = await crud.get_global_setting("LOCAL_AI_ENABLED")
-                    if pref is not None:
-                        status["preferred_provider"] = pref
-                    if enabled is not None:
-                        status["ai_enabled"] = bool(enabled)
-            return web.json_response(status)
+                # Persisted preferred provider (may be None)
+                status["preferred_provider"] = pref if pref is not None else None
+                # Persisted enabled flag overrides factory default if present
+                if enabled is not None:
+                    status["ai_enabled"] = bool(enabled)
+
+            # Normalize response shape and add helpful message when missing
+            providers = status.get("providers", {})
+            ai_enabled = bool(status.get("ai_enabled", False))
+            ai_available = bool(status.get("ai_available", False))
+            preferred = status.get("preferred_provider")
+            selected = status.get("selected_provider")
+            message = status.get("message")
+
+            # Compose fallback/selection message when not provided
+            if not message:
+                if not ai_enabled:
+                    message = "Local AI is disabled."
+                elif not ai_available:
+                    message = "AI is not available. Neither Ollama nor llama.cpp responded."
+                else:
+                    # Both or one available
+                    if preferred and selected and preferred != selected:
+                        message = f"Preferred provider {preferred} is unavailable, so {selected} is being used."
+                    elif selected:
+                        message = f"{selected} is the active Local AI provider."
+                    else:
+                        message = None
+
+            out = {
+                "ai_enabled": ai_enabled,
+                "ai_available": ai_available,
+                "preferred_provider": preferred,
+                "selected_provider": selected,
+                "providers": {
+                    "ollama": {"available": bool(providers.get("ollama", {}).get("available", False)), "label": providers.get("ollama", {}).get("label", "Ollama")},
+                    "llamacpp": {"available": bool(providers.get("llamacpp", {}).get("available", False)), "label": providers.get("llamacpp", {}).get("label", "llama.cpp")},
+                },
+                "message": message,
+            }
+
+            return web.json_response(out)
         except Exception as e:
             return web.json_response({"error": "failed", "message": str(e)}, status=500)
 
