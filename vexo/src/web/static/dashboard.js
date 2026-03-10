@@ -13,6 +13,7 @@ const API = {
     userDetail: (id) => `/api/users/${id}/detail`,
     notifications: '/api/notifications',
     settings_global: '/api/settings/global',
+    ai_status: '/api/services/ai/status',
     leave_guild: (id) => `/api/guilds/${id}/leave`,
     genres: '/api/genres',
 };
@@ -21,6 +22,8 @@ const API = {
 let ws = null;
 let currentGuild = null;
 let currentScope = 'global';
+let localAiPreferredProvider = null;
+let localAiStatus = null;
 
 // ============================================================
 // LOG STATE
@@ -1317,9 +1320,12 @@ async function loadSettingsTab() {
             const data = await res.json();
             const el = document.getElementById('setting-max-servers-tab');
             if (el) el.value = data.max_concurrent_servers || '';
+            applyLocalAiSettings(data);
         } catch (e) {
             console.error(e);
         }
+
+        await loadLocalAiStatus();
     } else {
         if (title) title.textContent = '⚙️ Server Settings';
         if (globalBlock) globalBlock.style.display = 'none';
@@ -1360,6 +1366,98 @@ async function loadSettingsTab() {
             }
         } catch (e) { console.error(e); }
     }
+}
+
+function applyLocalAiSettings(data) {
+    const enabledEl = document.getElementById('setting-local-ai-enabled');
+    if (enabledEl) {
+        enabledEl.checked = !!data.LOCAL_AI_ENABLED;
+    }
+
+    if (data && data.LOCAL_AI_PROVIDER) {
+        localAiPreferredProvider = String(data.LOCAL_AI_PROVIDER);
+    } else if (!localAiPreferredProvider && localAiStatus?.preferred_provider) {
+        localAiPreferredProvider = String(localAiStatus.preferred_provider);
+    }
+
+    updateLocalAiProviderButtons();
+    updateLocalAiStatusUi();
+}
+
+async function loadLocalAiStatus() {
+    try {
+        const res = await fetch(API.ai_status);
+        localAiStatus = res.ok ? await res.json() : null;
+    } catch (e) {
+        localAiStatus = null;
+    }
+
+    if (!localAiPreferredProvider && localAiStatus?.preferred_provider) {
+        localAiPreferredProvider = String(localAiStatus.preferred_provider);
+    }
+
+    updateLocalAiStatusUi();
+    updateLocalAiProviderButtons();
+}
+
+function selectLocalAiProvider(provider) {
+    localAiPreferredProvider = provider;
+    updateLocalAiProviderButtons();
+    updateLocalAiStatusUi();
+}
+
+function updateLocalAiProviderButtons() {
+    const btnOllama = document.getElementById('setting-local-ai-provider-ollama');
+    const btnLlama = document.getElementById('setting-local-ai-provider-llamacpp');
+
+    if (btnOllama) {
+        btnOllama.classList.toggle('active', localAiPreferredProvider === 'ollama');
+        const unavailable = localAiStatus?.providers?.ollama?.available === false;
+        btnOllama.classList.toggle('unavailable', unavailable);
+    }
+
+    if (btnLlama) {
+        btnLlama.classList.toggle('active', localAiPreferredProvider === 'llamacpp');
+        const unavailable = localAiStatus?.providers?.llamacpp?.available === false;
+        btnLlama.classList.toggle('unavailable', unavailable);
+    }
+}
+
+function updateLocalAiStatusUi() {
+    const availabilityEl = document.getElementById('local-ai-availability');
+    const activeEl = document.getElementById('local-ai-active');
+    const preferredEl = document.getElementById('local-ai-preferred');
+    const ollamaEl = document.getElementById('local-ai-ollama-status');
+    const llamaEl = document.getElementById('local-ai-llamacpp-status');
+    const messageEl = document.getElementById('local-ai-message');
+
+    const aiAvailable = localAiStatus?.ai_available;
+    const activeProvider = localAiStatus?.selected_provider ?? 'none';
+    const preferredProvider = localAiPreferredProvider ?? localAiStatus?.preferred_provider ?? 'none';
+
+    setStatusValue(availabilityEl, aiAvailable === true ? 'Available' : aiAvailable === false ? 'Unavailable' : 'Unknown', aiAvailable === true ? 'ok' : aiAvailable === false ? 'error' : 'warn');
+    setStatusValue(activeEl, activeProvider, activeProvider !== 'none' ? 'ok' : 'warn');
+    setStatusValue(preferredEl, preferredProvider, preferredProvider !== 'none' ? 'ok' : 'warn');
+
+    const ollamaAvailable = localAiStatus?.providers?.ollama?.available;
+    setStatusValue(ollamaEl, ollamaAvailable === true ? 'Available' : ollamaAvailable === false ? 'Unavailable' : 'Unknown', ollamaAvailable === true ? 'ok' : ollamaAvailable === false ? 'error' : 'warn');
+
+    const llamaAvailable = localAiStatus?.providers?.llamacpp?.available;
+    setStatusValue(llamaEl, llamaAvailable === true ? 'Available' : llamaAvailable === false ? 'Unavailable' : 'Unknown', llamaAvailable === true ? 'ok' : llamaAvailable === false ? 'error' : 'warn');
+
+    if (messageEl) {
+        messageEl.textContent = localAiStatus?.message ? String(localAiStatus.message) : '';
+        messageEl.style.display = messageEl.textContent ? 'block' : 'none';
+    }
+}
+
+function setStatusValue(el, text, tone) {
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove('status-ok', 'status-warn', 'status-error');
+    if (tone === 'ok') el.classList.add('status-ok');
+    if (tone === 'warn') el.classList.add('status-warn');
+    if (tone === 'error') el.classList.add('status-error');
 }
 
 async function fetchNotifications() {
@@ -1441,18 +1539,25 @@ async function saveServerSettings() {
 
 async function saveSettingsTab() {
     const maxServers = document.getElementById('setting-max-servers-tab').value;
+    const localAiEnabled = document.getElementById('setting-local-ai-enabled')?.checked;
 
     try {
         const res = await fetch(API.settings_global, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                max_concurrent_servers: parseInt(maxServers)
+                max_concurrent_servers: parseInt(maxServers),
+                LOCAL_AI_ENABLED: !!localAiEnabled,
+                LOCAL_AI_PROVIDER: localAiPreferredProvider
             })
         });
 
-        if (res.ok) alert('Global settings saved!');
-        else alert('Failed to save global settings');
+        if (res.ok) {
+            alert('Global settings saved!');
+            await loadSettingsTab();
+        } else {
+            alert('Failed to save global settings');
+        }
     } catch (e) {
         console.error(e);
         alert('Error saving global settings');

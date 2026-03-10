@@ -525,15 +525,15 @@ class PlayCog(commands.Cog):
                     return
 
             # Check if AI discovery is available
-                ai_client = getattr(self.bot, "ai_client", None)
-            if not ollama_client:
+            ai_client = getattr(self.bot, "ai_client", None)
+            if not ai_client:
                 try:
                     await interaction.followup.send("❌ AI is not configured on this bot.", ephemeral=True)
                 except discord.NotFound:
                     pass
                 return
 
-                ai_available = await ai_client.health_check()
+            ai_available = await ai_client.health_check()
             if not ai_available:
                 try:
                     await interaction.followup.send("❌ AI is currently unavailable. Please try again later.", ephemeral=True)

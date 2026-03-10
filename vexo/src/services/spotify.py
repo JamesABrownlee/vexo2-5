@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 
 import spotipy
+from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyClientCredentials
 
 from src.utils.logging import get_logger, Category, Event
@@ -48,9 +49,25 @@ class SpotifyService:
             ),
             requests_timeout=15,
         )
+        self.enabled = True
+        self.disabled_reason = None
+
+    def _disable(self, reason: str) -> None:
+        if self.enabled:
+            self.enabled = False
+            self.disabled_reason = reason
+            log.warning_cat(Category.API, "Spotify disabled", reason=reason)
+
+    def _handle_exception(self, e: Exception) -> None:
+        if isinstance(e, SpotifyException):
+            if e.http_status in {401, 403}:
+                self._disable(f"http_status={e.http_status}")
+                return
     
     async def search_track(self, query: str) -> SpotifyTrack | None:
         """Search for a track."""
+        if not self.enabled:
+            return None
         loop = asyncio.get_event_loop()
         try:
             results = await loop.run_in_executor(
@@ -73,11 +90,14 @@ class SpotifyService:
                 popularity=track["popularity"],
             )
         except Exception as e:
+            self._handle_exception(e)
             log.event(Category.API, Event.SEARCH_FAILED, level=logging.ERROR, service="spotify", error=str(e))
             return None
 
     async def search_artist(self, query: str) -> SpotifyArtist | None:
         """Search for an artist."""
+        if not self.enabled:
+            return None
         loop = asyncio.get_event_loop()
         try:
             results = await loop.run_in_executor(
@@ -96,11 +116,14 @@ class SpotifyService:
                 popularity=artist.get("popularity", 0),
             )
         except Exception as e:
+            self._handle_exception(e)
             log.error_cat(Category.API, "Spotify artist search error", error=str(e))
             return None
     
     async def get_artist(self, artist_id: str) -> SpotifyArtist | None:
         """Get artist info including genres."""
+        if not self.enabled:
+            return None
         loop = asyncio.get_event_loop()
         try:
             artist = await loop.run_in_executor(
@@ -114,12 +137,13 @@ class SpotifyService:
                 popularity=artist.get("popularity", 0),
             )
         except Exception as e:
+            self._handle_exception(e)
             log.error_cat(Category.API, "Error getting artist", artist_id=artist_id, error=str(e))
             return None
     
     async def get_artists_batch(self, artist_ids: list[str]) -> list[SpotifyArtist]:
         """Get multiple artists in batch (max 50)."""
-        if not artist_ids:
+        if not artist_ids or not self.enabled:
             return []
         
         loop = asyncio.get_event_loop()
@@ -142,12 +166,15 @@ class SpotifyService:
                             popularity=a.get("popularity", 0),
                         ))
             except Exception as e:
+                self._handle_exception(e)
                 log.error_cat(Category.API, "Error getting artist batch", error=str(e))
         
         return artists
     
     async def get_artist_top_tracks(self, artist_id: str, country: str = "US") -> list[SpotifyTrack]:
         """Get artist's top tracks."""
+        if not self.enabled:
+            return []
         loop = asyncio.get_event_loop()
         try:
             results = await loop.run_in_executor(
@@ -169,11 +196,14 @@ class SpotifyService:
                 ))
             return tracks
         except Exception as e:
+            self._handle_exception(e)
             log.error_cat(Category.API, "Error getting top tracks", error=str(e))
             return []
     
     async def get_related_artists(self, artist_id: str) -> list[SpotifyArtist]:
         """Get related artists."""
+        if not self.enabled:
+            return []
         loop = asyncio.get_event_loop()
         try:
             results = await loop.run_in_executor(
@@ -190,11 +220,14 @@ class SpotifyService:
                 for a in results["artists"]
             ]
         except Exception as e:
+            self._handle_exception(e)
             log.error_cat(Category.API, "Error getting related artists", error=str(e))
             return []
     
     async def get_playlist_tracks(self, playlist_url: str) -> list[SpotifyTrack]:
         """Get all tracks from a Spotify playlist."""
+        if not self.enabled:
+            return []
         loop = asyncio.get_event_loop()
         try:
             # Extract playlist ID from URL
@@ -239,6 +272,7 @@ class SpotifyService:
             
             return tracks
         except Exception as e:
+            self._handle_exception(e)
             log.error_cat(Category.API, "Error getting playlist", error=str(e))
             return []
     

@@ -24,6 +24,12 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-https://ollama.plingindigo.org}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
       - OLLAMA_TOKEN=${OLLAMA_TOKEN}
+      - LOCAL_AI_ENABLED=${LOCAL_AI_ENABLED:-false}
+      - LOCAL_AI_PROVIDER=${LOCAL_AI_PROVIDER}
+      - LOCAL_AI_MODEL=${LOCAL_AI_MODEL}
+      - LLAMACPP_BASE_URL=${LLAMACPP_BASE_URL}
+      - LLAMACPP_MODEL=${LLAMACPP_MODEL}
+      - LLAMACPP_TOKEN=${LLAMACPP_TOKEN}
     volumes:
       - ./data:/app/data
     ports:

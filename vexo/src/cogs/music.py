@@ -1332,14 +1332,14 @@ class MusicCog(commands.Cog):
                         log.error_cat(Category.DATABASE, "Failed to persist AI autoplay suggestion", error=str(e))
                     
                     # Return the first valid track
-                            log.info_cat(
-                                Category.DISCOVERY,
-                                "AI discovery found track",
-                                title=track.title,
-                                artist=track.artist,
-                                for_user_id=target_user_id
-                            )
-                    
+                    log.info_cat(
+                        Category.DISCOVERY,
+                        "AI discovery found track",
+                        title=track.title,
+                        artist=track.artist,
+                        for_user_id=target_user_id
+                    )
+
                     return QueueItem(
                         video_id=track.video_id,
                         title=track.title,
