@@ -10,6 +10,35 @@ interface SettingToggle {
     enabled: boolean;
 }
 
+interface AIProviderInfo {
+    available?: boolean;
+    label?: string;
+}
+
+interface AIStatus {
+    ai_enabled?: boolean;
+    ai_available?: boolean;
+    preferred_provider?: string | null;
+    selected_provider?: string | null;
+    message?: string | null;
+    providers?: {
+        ollama?: AIProviderInfo;
+        llamacpp?: AIProviderInfo;
+        [key: string]: AIProviderInfo | undefined;
+    };
+}
+
+interface GlobalSettings {
+    LOCAL_AI_ENABLED?: boolean;
+    LOCAL_AI_PROVIDER?: string | null;
+    max_concurrent_servers?: string | number | null;
+}
+
+interface SettingsPayload {
+    LOCAL_AI_ENABLED: boolean;
+    LOCAL_AI_PROVIDER: string | null;
+}
+
 export default function SettingsPage() {
     const [settings, setSettings] = useState<SettingToggle[]>([
         {
@@ -62,36 +91,6 @@ export default function SettingsPage() {
     const [preferredProvider, setPreferredProvider] = useState<string | null>(null);
     const [aiEnabled, setAiEnabled] = useState<boolean>(false);
     const [saving, setSaving] = useState<boolean>(false);
-
-    interface AIProviderInfo {
-        available?: boolean;
-        label?: string;
-    }
-
-    interface AIStatus {
-        ai_enabled?: boolean;
-        ai_available?: boolean;
-        preferred_provider?: string | null;
-        selected_provider?: string | null;
-        message?: string | null;
-        providers?: {
-            ollama?: AIProviderInfo;
-            llamacpp?: AIProviderInfo;
-            [key: string]: AIProviderInfo | undefined;
-        };
-    }
-
-    interface GlobalSettings {
-        LOCAL_AI_ENABLED?: boolean;
-        LOCAL_AI_PROVIDER?: string | null;
-        [key: string]: any;
-    }
-
-    interface SettingsPayload {
-        LOCAL_AI_ENABLED: boolean;
-        LOCAL_AI_PROVIDER: string | null;
-    }
-
     const [aiStatus, setAiStatus] = useState<AIStatus | null>(null);
 
     useEffect(() => {
