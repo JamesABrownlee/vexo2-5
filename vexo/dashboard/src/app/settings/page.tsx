@@ -79,12 +79,17 @@ export default function SettingsPage() {
 
                 setAiStatus(statusJson);
 
-                if (settingsJson) {
-                    // persisted settings expose LOCAL_AI_ENABLED and LOCAL_AI_PROVIDER
+                // Determine initial preferred and enabled values.
+                if (settingsJson && typeof settingsJson.LOCAL_AI_ENABLED !== 'undefined') {
                     setAiEnabled(Boolean(settingsJson.LOCAL_AI_ENABLED));
-                    if (settingsJson.LOCAL_AI_PROVIDER) {
-                        setPreferredProvider(String(settingsJson.LOCAL_AI_PROVIDER));
-                    }
+                } else if (statusJson && typeof statusJson.ai_enabled !== 'undefined') {
+                    setAiEnabled(Boolean(statusJson.ai_enabled));
+                }
+
+                if (settingsJson && settingsJson.LOCAL_AI_PROVIDER) {
+                    setPreferredProvider(String(settingsJson.LOCAL_AI_PROVIDER));
+                } else if (statusJson && statusJson.preferred_provider) {
+                    setPreferredProvider(String(statusJson.preferred_provider));
                 }
             } catch (e) {
                 setAiStatus(null);
@@ -110,15 +115,31 @@ export default function SettingsPage() {
             const payload: any = { LOCAL_AI_PROVIDER: preferredProvider };
             payload.LOCAL_AI_ENABLED = aiEnabled;
             await postSettings(payload);
-            // Refresh status
-            const res = await fetch('/api/services/ai/status');
-            if (res.ok) setAiStatus(await res.json());
+            // Refresh persisted settings and runtime status
+            const [settingsRes, statusRes] = await Promise.all([fetch('/api/settings/global'), fetch('/api/services/ai/status')]);
+            if (settingsRes.ok) {
+                const sj = await settingsRes.json();
+                if (typeof sj.LOCAL_AI_ENABLED !== 'undefined') setAiEnabled(Boolean(sj.LOCAL_AI_ENABLED));
+                if (sj.LOCAL_AI_PROVIDER) setPreferredProvider(String(sj.LOCAL_AI_PROVIDER));
+            }
+            if (statusRes.ok) setAiStatus(await statusRes.json());
         } catch (e) {
             // ignore for now
         } finally {
             setSaving(false);
         }
     }
+
+    // Ensure toggling ai discovery syncs persisted aiEnabled state
+    const toggleAiSetting = (id: string) => {
+        if (id === 'ai_discovery_enabled') {
+            const newVal = !aiEnabled;
+            setAiEnabled(newVal);
+            setAiSettings(prev => prev.map(s => s.id === id ? { ...s, enabled: newVal } : s));
+        } else {
+            setAiSettings(prev => prev.map(s => (s.id === id ? { ...s, enabled: !s.enabled } : s)));
+        }
+    };
 
     const [defaultVolume, setDefaultVolume] = useState(50);
     const [discoveryChance, setDiscoveryChance] = useState(70);
