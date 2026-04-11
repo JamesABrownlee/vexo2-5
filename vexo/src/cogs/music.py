@@ -1403,8 +1403,9 @@ class MusicCog(commands.Cog):
                 except Exception:
                     pass
             
-            # Get target user's likes
+            # Get target user's likes and dislikes
             liked_tracks = await reaction_crud.get_liked_songs(target_user_id, limit=20)
+            user_disliked_tracks = await reaction_crud.get_disliked_songs(target_user_id, limit=50)
             
             # Get dislikes from all VC members (hard veto)
             all_dislikes_map = await reaction_crud.get_disliked_songs_for_users(voice_members, limit_per_user=50)
@@ -1441,13 +1442,17 @@ class MusicCog(commands.Cog):
                     "year": player.current.year,
                 }
             
+            liked_simple = [{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks]
+            user_disliked_simple = [{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in user_disliked_tracks]
+            all_disliked_simple = [{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in all_dislikes]
+
             # Get AI suggestions
             if seed_track and liked_tracks:
                 # Use hybrid: seed + user preferences
                 suggestions = await ai_client.suggest_for_user(
-                    liked_tracks=[{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks],
-                    disliked_tracks=[],  # Already in exclude_list
-                    group_disliked_tracks=[],  # Already in exclude_list
+                    liked_tracks=liked_simple,
+                    disliked_tracks=user_disliked_simple,
+                    group_disliked_tracks=all_disliked_simple,
                     exclude_list=exclude_list,
                     n_candidates=20
                 )
@@ -1461,9 +1466,9 @@ class MusicCog(commands.Cog):
             elif liked_tracks:
                 # Use user preferences only
                 suggestions = await ai_client.suggest_for_user(
-                    liked_tracks=[{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks],
-                    disliked_tracks=[],
-                    group_disliked_tracks=[],
+                    liked_tracks=liked_simple,
+                    disliked_tracks=user_disliked_simple,
+                    group_disliked_tracks=all_disliked_simple,
                     exclude_list=exclude_list,
                     n_candidates=20
                 )
@@ -1703,6 +1708,20 @@ class MusicCog(commands.Cog):
             return
         
         try:
+            # Best-effort metadata enrichment helps the AI reason about era/genre/style.
+            if hasattr(self, "enrichment") and self.enrichment:
+                if not track.year or not track.genre:
+                    try:
+                        meta = await self.enrichment.enrich_metadata(track.artist, track.title, timeout_s=5.0)
+                        if meta:
+                            genres = meta.get("genres") or []
+                            if genres and not track.genre:
+                                track.genre = str(genres[0]).title()
+                            if meta.get("year") and not track.year:
+                                track.year = meta.get("year")
+                    except Exception as e:
+                        log.debug_cat(Category.API, "Seed metadata enrichment failed", error=str(e), title=track.title, artist=track.artist)
+
             # Build exclude list (current track + recent + dislikes). /play ai starts
             # generation before the seed is always visible in DB history.
             exclude_list = [{"title": track.title, "artist": track.artist}]

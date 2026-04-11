@@ -119,7 +119,7 @@ class Config:
             LLAMACPP_BASE_URL=os.getenv("LLAMACPP_BASE_URL"),
             LLAMACPP_MODEL=os.getenv("LLAMACPP_MODEL"),
             LLAMACPP_TOKEN=os.getenv("LLAMACPP_TOKEN"),
-            GEMMA_BASE_URL=os.getenv("GEMMA_BASE_URL", "https://GEMMA.systemsfinance.co.uk"),
+            GEMMA_BASE_URL=os.getenv("GEMMA_BASE_URL", "http://gemma-search.local"),
             GEMMA_MODEL=os.getenv("GEMMA_MODEL", "gemma-4-e4b-it-Q4_K_M.gguf"),
             GEMMA_TOKEN=os.getenv("GEMMA_TOKEN"),
             OPENAI_API_KEY=os.getenv("OPENAI_API_KEY"),

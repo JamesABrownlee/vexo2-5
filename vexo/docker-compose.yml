@@ -14,6 +14,10 @@ services:
       - RADIO_PRESENTER_VOICE=${RADIO_PRESENTER_VOICE}
       - OBS_AUDIO_ENABLED=${OBS_AUDIO_ENABLED:-false}
       - OBS_AUDIO_BITRATE_KBPS=${OBS_AUDIO_BITRATE_KBPS:-192}
+      - DISCOGS_TOKEN=${DISCOGS_TOKEN}
+      - DISCOGS_KEY=${DISCOGS_KEY}
+      - DISCOGS_SECRET=${DISCOGS_SECRET}
+      - MUSICBRAINZ_ENABLED=${MUSICBRAINZ_ENABLED:-false}
       - DISCORD_OAUTH_CLIENT_ID=${DISCORD_OAUTH_CLIENT_ID}
       - DISCORD_OAUTH_CLIENT_SECRET=${DISCORD_OAUTH_CLIENT_SECRET}
       - DISCORD_OAUTH_REDIRECT_URI=${DISCORD_OAUTH_REDIRECT_URI}
@@ -30,7 +34,7 @@ services:
       - LLAMACPP_BASE_URL=${LLAMACPP_BASE_URL}
       - LLAMACPP_MODEL=${LLAMACPP_MODEL}
       - LLAMACPP_TOKEN=${LLAMACPP_TOKEN}
-      - GEMMA_BASE_URL=${GEMMA_BASE_URL:-https://GEMMA.systemsfinance.co.uk}
+      - GEMMA_BASE_URL=${GEMMA_BASE_URL:-http://gemma-search.local}
       - GEMMA_MODEL=${GEMMA_MODEL:-gemma-4-e4b-it-Q4_K_M.gguf}
       - GEMMA_TOKEN=${GEMMA_TOKEN}
       - CODEX_PROXY_URL=${CODEX_PROXY_URL}
@@ -39,6 +43,8 @@ services:
       - CODEX_TARGET_URL=${CODEX_TARGET_URL}
     volumes:
       - ./data:/app/data
+    extra_hosts:
+      - "gemma-search.local:host-gateway"
     ports:
       - "6767:8080" # Map container 8080 to host 6767
     healthcheck:

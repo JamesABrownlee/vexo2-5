@@ -27,6 +27,13 @@ log = get_logger(__name__)
 
 class LlamaCppClient(BaseAIClient):
     provider_name = "llamacpp"
+    MUSIC_SOURCE_HINT = (
+        "When live web context is useful for music discovery, favor music-focused sources such as "
+        "AllMusic, Discogs, MusicBrainz, Rate Your Music, Bandcamp, Last.fm, Spotify, official artist sites, "
+        "label rosters, festival lineups, and reputable music magazines. "
+        "Use those sources to validate that a recommendation is a real track and to find adjacent songs, "
+        "but still prioritize tracks that are easy to find and play."
+    )
 
     SYSTEM_PROMPT = (
         "You are a music recommendation service."
@@ -67,8 +74,11 @@ class LlamaCppClient(BaseAIClient):
             try:
                 # Try OpenAI-compatible models endpoint first
                 url = f"{self.base_url}/v1/models"
+                headers = {}
+                if self.bearer_token:
+                    headers["Authorization"] = f"Bearer {self.bearer_token}"
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                         ok = resp.status == 200
                         self._last_health_status = ok
                         self._last_health_check = now
@@ -310,7 +320,11 @@ class LlamaCppClient(BaseAIClient):
         seed_title = seed_track.get("title", "Unknown")
         seed_artist = seed_track.get("artist", "Unknown")
         language_policy = language_policy_prompt(seed_track)
-        prompt = f"Based on the seed track \"{seed_title}\" by {seed_artist}, suggest {n_candidates} similar songs. {language_policy} Return JSON with a top-level 'suggestions' array of {{title, artist, reason}} objects."
+        prompt = (
+            f"Based on the seed track \"{seed_title}\" by {seed_artist}, suggest {n_candidates} similar songs. "
+            f"{language_policy} {self.MUSIC_SOURCE_HINT} "
+            "Return JSON with a top-level 'suggestions' array of {title, artist, reason} objects."
+        )
 
         payload = {
             "model": self.model or "gpt",
@@ -382,7 +396,19 @@ class LlamaCppClient(BaseAIClient):
     async def suggest_for_user(self, liked_tracks: list[dict], disliked_tracks: list[dict], group_disliked_tracks: list[dict], exclude_list: list[dict], n_candidates: int = 20) -> list[AISuggestion]:
         likes = "\n".join([f"- {t.get('title','')} by {t.get('artist','')}" for t in (liked_tracks or [])[:20]]) or "none provided"
         language_policy = language_policy_prompt()
-        prompt = f"Based on the user's likes:\n{likes}\n{language_policy}\nSuggest {n_candidates} songs the user would enjoy. Return JSON with suggestions array of {{title,artist,reason}}."
+        all_excludes = (disliked_tracks or []) + (group_disliked_tracks or []) + (exclude_list or [])
+        exclude_str = ""
+        if all_excludes:
+            excluded = "\n".join(
+                f"- {t.get('title', '')} by {t.get('artist', '')}"
+                for t in all_excludes[:80]
+            )
+            exclude_str = f"\nDo not suggest any of these tracks:\n{excluded}"
+        prompt = (
+            f"Based on the user's likes:\n{likes}\n{language_policy}\n{self.MUSIC_SOURCE_HINT}\n"
+            f"Suggest {n_candidates} songs the user would enjoy.{exclude_str}\n"
+            "Return JSON with suggestions array of {title,artist,reason}."
+        )
         payload = {
             "model": self.model or "gpt",
             "messages": [
@@ -456,7 +482,12 @@ class LlamaCppClient(BaseAIClient):
                 for t in exclude_list[:50]
             )
             exclude_text = f"\nDo not suggest any of these tracks:\n{excluded}"
-        prompt = f"Based on {seed_title} by {seed_artist}, suggest up to {n_alternatives} alternatives. {language_policy} Return JSON with 'autoplay_next' and 'alternatives' array (each item title,artist,reason).{exclude_text}"
+        prompt = (
+            f"Based on {seed_title} by {seed_artist}, suggest up to {n_alternatives} alternatives. "
+            f"{language_policy} {self.MUSIC_SOURCE_HINT} "
+            "Return JSON with 'autoplay_next' and 'alternatives' array (each item title,artist,reason)."
+            f"{exclude_text}"
+        )
         payload = {
             "model": self.model or "gpt",
             "messages": [
