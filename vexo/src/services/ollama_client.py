@@ -17,6 +17,7 @@ from typing import Optional
 import aiohttp
 
 from src.utils.logging import get_logger, Category
+from src.services.ai.language_policy import language_policy_prompt
 
 log = get_logger(__name__)
 
@@ -237,11 +238,14 @@ class OllamaClient:
         seed_artist = seed_track.get("artist", "Unknown")
         seed_genre = seed_track.get("genre", "")
         seed_year = seed_track.get("year", "")
+        language_policy = language_policy_prompt(seed_track)
         
         genre_info = f"\nGenre: {seed_genre}" if seed_genre else ""
         year_info = f"\nYear: {seed_year}" if seed_year else ""
         
         prompt = f"""Based on the seed track "{seed_title}" by {seed_artist}{genre_info}{year_info}, suggest {n_candidates} similar songs that a listener would enjoy.
+
+{language_policy}
 
 Return ONLY valid JSON in this exact format (no other text):
 {{
@@ -308,6 +312,7 @@ Return strictly valid JSON with no markdown, no extra text."""
         if liked_tracks:
             like_items = [f"- {t.get('title', '')} by {t.get('artist', '')}" for t in liked_tracks[:20]]
             likes_str = "\n".join(like_items)
+        language_policy = language_policy_prompt()
         
         # Build dislikes/exclusions
         all_excludes = (disliked_tracks or []) + (group_disliked_tracks or []) + (exclude_list or [])
@@ -317,6 +322,8 @@ Return strictly valid JSON with no markdown, no extra text."""
             exclude_str = "\n\nDo NOT suggest any of these tracks (user/group dislikes or recently played):\n" + "\n".join(exclude_items)
         
         prompt = f"""Based on a user's music preferences, suggest {n_candidates} songs they would enjoy.
+
+{language_policy}
 
 USER LIKES:
 {likes_str}
@@ -387,6 +394,7 @@ Return strictly valid JSON with no markdown, no extra text."""
         seed_artist = seed_track.get("artist", "Unknown")
         seed_genre = seed_track.get("genre", "")
         seed_year = seed_track.get("year", "")
+        language_policy = language_policy_prompt(seed_track)
         
         genre_info = f"\nGenre: {seed_genre}" if seed_genre else ""
         year_info = f"\nYear: {seed_year}" if seed_year else ""
@@ -394,6 +402,8 @@ Return strictly valid JSON with no markdown, no extra text."""
         prompt = f"""Based on the currently playing track "{seed_title}" by {seed_artist}{genre_info}{year_info}, suggest:
 1. ONE best default next track (autoplay_next)
 2. {n_alternatives} alternative tracks for the user to choose from
+
+{language_policy}
 
 Return ONLY valid JSON in this EXACT format (no other text):
 {{

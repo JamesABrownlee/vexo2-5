@@ -20,6 +20,7 @@ import aiohttp
 
 from src.utils.logging import get_logger, Category
 from src.services.ai.base import BaseAIClient, AISuggestion, AIPlayModeResult
+from src.services.ai.language_policy import language_policy_prompt
 
 log = get_logger(__name__)
 
@@ -308,7 +309,8 @@ class LlamaCppClient(BaseAIClient):
         # Use similar prompt as Ollama but send via OpenAI-compatible call
         seed_title = seed_track.get("title", "Unknown")
         seed_artist = seed_track.get("artist", "Unknown")
-        prompt = f"Based on the seed track \"{seed_title}\" by {seed_artist}, suggest {n_candidates} similar songs. Return JSON with a top-level 'suggestions' array of {{title, artist, reason}} objects."
+        language_policy = language_policy_prompt(seed_track)
+        prompt = f"Based on the seed track \"{seed_title}\" by {seed_artist}, suggest {n_candidates} similar songs. {language_policy} Return JSON with a top-level 'suggestions' array of {{title, artist, reason}} objects."
 
         payload = {
             "model": self.model or "gpt",
@@ -379,7 +381,8 @@ class LlamaCppClient(BaseAIClient):
 
     async def suggest_for_user(self, liked_tracks: list[dict], disliked_tracks: list[dict], group_disliked_tracks: list[dict], exclude_list: list[dict], n_candidates: int = 20) -> list[AISuggestion]:
         likes = "\n".join([f"- {t.get('title','')} by {t.get('artist','')}" for t in (liked_tracks or [])[:20]]) or "none provided"
-        prompt = f"Based on the user's likes:\n{likes}\nSuggest {n_candidates} songs the user would enjoy. Return JSON with suggestions array of {{title,artist,reason}}."
+        language_policy = language_policy_prompt()
+        prompt = f"Based on the user's likes:\n{likes}\n{language_policy}\nSuggest {n_candidates} songs the user would enjoy. Return JSON with suggestions array of {{title,artist,reason}}."
         payload = {
             "model": self.model or "gpt",
             "messages": [
@@ -445,7 +448,15 @@ class LlamaCppClient(BaseAIClient):
     async def suggest_for_play_mode(self, seed_track: dict, exclude_list: list[dict], n_alternatives: int = 9) -> Optional[AIPlayModeResult]:
         seed_title = seed_track.get("title", "Unknown")
         seed_artist = seed_track.get("artist", "Unknown")
-        prompt = f"Based on {seed_title} by {seed_artist}, suggest up to {n_alternatives} alternatives and return JSON with 'autoplay_next' and 'alternatives' array (each item title,artist,reason)."
+        language_policy = language_policy_prompt(seed_track)
+        exclude_text = ""
+        if exclude_list:
+            excluded = "\n".join(
+                f"- {t.get('title', '')} by {t.get('artist', '')}"
+                for t in exclude_list[:50]
+            )
+            exclude_text = f"\nDo not suggest any of these tracks:\n{excluded}"
+        prompt = f"Based on {seed_title} by {seed_artist}, suggest up to {n_alternatives} alternatives. {language_policy} Return JSON with 'autoplay_next' and 'alternatives' array (each item title,artist,reason).{exclude_text}"
         payload = {
             "model": self.model or "gpt",
             "messages": [

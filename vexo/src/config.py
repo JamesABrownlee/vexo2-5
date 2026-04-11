@@ -44,13 +44,28 @@ class Config:
     OLLAMA_BASE_URL: str
     OLLAMA_MODEL: str
     OLLAMA_TOKEN: str | None
-    # Local AI provider config (supports 'ollama' and 'llamacpp')
+    # AI provider config (supports 'ollama', 'llamacpp', 'gemma', and 'openai')
     LOCAL_AI_ENABLED: bool
     LOCAL_AI_PROVIDER: str | None
     LOCAL_AI_MODEL: str | None
     LLAMACPP_BASE_URL: str | None
     LLAMACPP_MODEL: str | None
     LLAMACPP_TOKEN: str | None
+    GEMMA_BASE_URL: str | None
+    GEMMA_MODEL: str | None
+    GEMMA_TOKEN: str | None
+
+    # Optional: OpenAI (hosted) AI provider
+    OPENAI_API_KEY: str | None
+    OPENAI_MODEL: str | None
+    OPENAI_BASE_URL: str | None
+
+    # Optional: OpenAI Codex via internal proxy transport
+    CODEX_PROXY_URL: str | None
+    CODEX_PROXY_TOKEN: str | None
+    CODEX_PROXY_LABEL: str | None
+    CODEX_MODEL: str | None
+    CODEX_TARGET_URL: str | None
 
     # Optional: OAuth scaffolding for dashboard auth
     DISCORD_OAUTH_CLIENT_ID: str | None
@@ -104,6 +119,17 @@ class Config:
             LLAMACPP_BASE_URL=os.getenv("LLAMACPP_BASE_URL"),
             LLAMACPP_MODEL=os.getenv("LLAMACPP_MODEL"),
             LLAMACPP_TOKEN=os.getenv("LLAMACPP_TOKEN"),
+            GEMMA_BASE_URL=os.getenv("GEMMA_BASE_URL", "https://GEMMA.systemsfinance.co.uk"),
+            GEMMA_MODEL=os.getenv("GEMMA_MODEL", "gemma-4-e4b-it-Q4_K_M.gguf"),
+            GEMMA_TOKEN=os.getenv("GEMMA_TOKEN"),
+            OPENAI_API_KEY=os.getenv("OPENAI_API_KEY"),
+            OPENAI_MODEL=os.getenv("OPENAI_MODEL"),
+            OPENAI_BASE_URL=os.getenv("OPENAI_BASE_URL"),
+            CODEX_PROXY_URL=os.getenv("CODEX_PROXY_URL"),
+            CODEX_PROXY_TOKEN=os.getenv("CODEX_PROXY_TOKEN"),
+            CODEX_PROXY_LABEL=os.getenv("CODEX_PROXY_LABEL"),
+            CODEX_MODEL=os.getenv("CODEX_MODEL"),
+            CODEX_TARGET_URL=os.getenv("CODEX_TARGET_URL"),
             DISCORD_OAUTH_CLIENT_ID=os.getenv("DISCORD_OAUTH_CLIENT_ID"),
             DISCORD_OAUTH_CLIENT_SECRET=os.getenv("DISCORD_OAUTH_CLIENT_SECRET"),
             DISCORD_OAUTH_REDIRECT_URI=os.getenv("DISCORD_OAUTH_REDIRECT_URI"),

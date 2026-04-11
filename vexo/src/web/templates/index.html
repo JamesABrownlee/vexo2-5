@@ -613,6 +613,9 @@
                     <div class="provider-row">
                         <button class="btn-secondary" id="setting-local-ai-provider-ollama" onclick="selectLocalAiProvider('ollama')">Ollama</button>
                         <button class="btn-secondary" id="setting-local-ai-provider-llamacpp" onclick="selectLocalAiProvider('llamacpp')">llama.cpp</button>
+                        <button class="btn-secondary" id="setting-local-ai-provider-gemma" onclick="selectLocalAiProvider('gemma')">Gemma</button>
+                        <button class="btn-secondary" id="setting-local-ai-provider-openai" onclick="selectLocalAiProvider('openai')">OpenAI</button>
+                        <button class="btn-secondary" id="setting-local-ai-provider-openai-codex" onclick="selectLocalAiProvider('openai_codex')">OpenAI Codex</button>
                     </div>
                     <div class="status-card" id="local-ai-status-card">
                         <div class="status-row">
@@ -634,6 +637,18 @@
                         <div class="status-row">
                             <span class="status-label">llama.cpp</span>
                             <span class="status-value" id="local-ai-llamacpp-status">Unknown</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-label">Gemma</span>
+                            <span class="status-value" id="local-ai-gemma-status">Unknown</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-label">OpenAI</span>
+                            <span class="status-value" id="local-ai-openai-status">Unknown</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-label">OpenAI Codex</span>
+                            <span class="status-value" id="local-ai-openai-codex-status">Unknown</span>
                         </div>
                         <div class="status-message" id="local-ai-message"></div>
                     </div>
@@ -795,7 +810,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="/static/dashboard.js"></script>
+    <script src="/static/dashboard.js?v=20260411-gemma-status"></script>
 </body>
 
 </html>

@@ -1386,7 +1386,7 @@ function applyLocalAiSettings(data) {
 
 async function loadLocalAiStatus() {
     try {
-        const res = await fetch(API.ai_status);
+        const res = await fetch(API.ai_status, { cache: 'no-store' });
         localAiStatus = res.ok ? await res.json() : null;
     } catch (e) {
         localAiStatus = null;
@@ -1409,6 +1409,9 @@ function selectLocalAiProvider(provider) {
 function updateLocalAiProviderButtons() {
     const btnOllama = document.getElementById('setting-local-ai-provider-ollama');
     const btnLlama = document.getElementById('setting-local-ai-provider-llamacpp');
+    const btnGemma = document.getElementById('setting-local-ai-provider-gemma');
+    const btnOpenAI = document.getElementById('setting-local-ai-provider-openai');
+    const btnOpenAICodex = document.getElementById('setting-local-ai-provider-openai-codex');
 
     if (btnOllama) {
         btnOllama.classList.toggle('active', localAiPreferredProvider === 'ollama');
@@ -1421,6 +1424,24 @@ function updateLocalAiProviderButtons() {
         const unavailable = localAiStatus?.providers?.llamacpp?.available === false;
         btnLlama.classList.toggle('unavailable', unavailable);
     }
+
+    if (btnGemma) {
+        btnGemma.classList.toggle('active', localAiPreferredProvider === 'gemma');
+        const unavailable = localAiStatus?.providers?.gemma?.available === false;
+        btnGemma.classList.toggle('unavailable', unavailable);
+    }
+
+    if (btnOpenAI) {
+        btnOpenAI.classList.toggle('active', localAiPreferredProvider === 'openai');
+        const unavailable = localAiStatus?.providers?.openai?.available === false;
+        btnOpenAI.classList.toggle('unavailable', unavailable);
+    }
+
+    if (btnOpenAICodex) {
+        btnOpenAICodex.classList.toggle('active', localAiPreferredProvider === 'openai_codex');
+        const unavailable = localAiStatus?.providers?.openai_codex?.available === false;
+        btnOpenAICodex.classList.toggle('unavailable', unavailable);
+    }
 }
 
 function updateLocalAiStatusUi() {
@@ -1429,6 +1450,9 @@ function updateLocalAiStatusUi() {
     const preferredEl = document.getElementById('local-ai-preferred');
     const ollamaEl = document.getElementById('local-ai-ollama-status');
     const llamaEl = document.getElementById('local-ai-llamacpp-status');
+    const gemmaEl = document.getElementById('local-ai-gemma-status');
+    const openaiEl = document.getElementById('local-ai-openai-status');
+    const openaiCodexEl = document.getElementById('local-ai-openai-codex-status');
     const messageEl = document.getElementById('local-ai-message');
 
     const aiAvailable = localAiStatus?.ai_available;
@@ -1445,10 +1469,19 @@ function updateLocalAiStatusUi() {
     const llamaAvailable = localAiStatus?.providers?.llamacpp?.available;
     setStatusValue(llamaEl, llamaAvailable === true ? 'Available' : llamaAvailable === false ? 'Unavailable' : 'Unknown', llamaAvailable === true ? 'ok' : llamaAvailable === false ? 'error' : 'warn');
 
+    const gemmaAvailable = localAiStatus?.providers?.gemma?.available;
+    setStatusValue(gemmaEl, gemmaAvailable === true ? 'Available' : gemmaAvailable === false ? 'Unavailable' : 'Unknown', gemmaAvailable === true ? 'ok' : gemmaAvailable === false ? 'error' : 'warn');
+
+    const openaiAvailable = localAiStatus?.providers?.openai?.available;
+    setStatusValue(openaiEl, openaiAvailable === true ? 'Available' : openaiAvailable === false ? 'Unavailable' : 'Unknown', openaiAvailable === true ? 'ok' : openaiAvailable === false ? 'error' : 'warn');
+
+    const openaiCodexAvailable = localAiStatus?.providers?.openai_codex?.available;
+    setStatusValue(openaiCodexEl, openaiCodexAvailable === true ? 'Available' : openaiCodexAvailable === false ? 'Unavailable' : 'Unknown', openaiCodexAvailable === true ? 'ok' : openaiCodexAvailable === false ? 'error' : 'warn');
+
     if (messageEl) {
         let messageText = localAiStatus?.message ? String(localAiStatus.message) : '';
-        if (!messageText && ollamaAvailable === false && llamaAvailable === false) {
-            messageText = 'No Local AI providers are available.';
+        if (!messageText && ollamaAvailable === false && llamaAvailable === false && gemmaAvailable === false && openaiAvailable === false && openaiCodexAvailable === false) {
+            messageText = 'No AI providers are available.';
         }
         messageEl.textContent = messageText;
         messageEl.style.display = messageText ? 'block' : 'none';

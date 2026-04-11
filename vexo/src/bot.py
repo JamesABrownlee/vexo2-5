@@ -125,17 +125,9 @@ class MusicBot(commands.Bot):
         # Never allow tracing/logging to break Discord's interaction pipeline.
         try:
             if interaction and interaction.id:
-                if interaction.type == discord.InteractionType.application_command:
-                    data = interaction.data or {}
-                    cmd_name = str(data.get("name") or "").lower()
-
-                    # ACK first for potentially heavy commands to avoid 3s expiry.
-                    # Keep this ahead of all logging/serialization work.
-                    if cmd_name in {"play", "import"} and not interaction.response.is_done():
-                        await self._try_predefer(interaction, cmd_name)
-
                 self._log_interaction_start(interaction)
                 if interaction.type == discord.InteractionType.application_command:
+                    data = interaction.data or {}
                     opts = self._summarize_options(data.get("options"))
                     self._interaction_started[interaction.id] = {
                         "t0": time.perf_counter(),
@@ -283,6 +275,20 @@ class MusicBot(commands.Bot):
         
         self.db = await DatabaseManager.create(config.DATABASE_PATH)
         log.event(Category.DATABASE, "initialized", path=config.DATABASE_PATH)
+
+        # Load persisted global settings (if present) and apply to in-memory config.
+        # This allows switching AI providers from the dashboard without redeploying env vars.
+        try:
+            from src.database.crud import SystemCRUD
+            sys_crud = SystemCRUD(self.db)
+            persisted_enabled = await sys_crud.get_global_setting("LOCAL_AI_ENABLED")
+            persisted_provider = await sys_crud.get_global_setting("LOCAL_AI_PROVIDER")
+            if persisted_enabled is not None:
+                config.LOCAL_AI_ENABLED = bool(persisted_enabled)
+            if persisted_provider is not None:
+                config.LOCAL_AI_PROVIDER = str(persisted_provider)
+        except Exception:
+            pass
         
         # Initialize services
         from src.services.youtube import YouTubeService

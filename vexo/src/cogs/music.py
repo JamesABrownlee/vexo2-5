@@ -17,6 +17,12 @@ from src.services.youtube import YouTubeService, YTTrack, StreamInfo
 from src.services.enrichment_worker import EnrichmentWorker
 from src.services.metadata_enricher import MetadataEnricher
 from src.services.stream_resolver import StreamResolverWorker
+from src.services.ai.language_policy import (
+    ENGLISH_DEFAULT,
+    EXPLICIT_LANGUAGE_SESSION,
+    NON_ENGLISH_ONE_SHOT,
+    is_likely_non_english_suggestion,
+)
 from src.database.crud import SongCRUD, UserCRUD, PlaybackCRUD, ReactionCRUD, GuildCRUD
 from src.utils.logging import get_logger, Category, Event
 
@@ -81,6 +87,8 @@ class QueueItem:
     duration_seconds: int | None = None
     genre: str | None = None
     year: int | None = None
+    language_policy: str | None = None
+    language_hint: str | None = None
 
 
 @dataclass
@@ -113,6 +121,7 @@ class GuildPlayer:
     _current_source: discord.AudioSource | None = None
     _current_stream_info: StreamInfo | None = None
     _play_task: asyncio.Task | None = None
+    _queue_fill_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     
     # AI Play Mode state
     ai_mode_enabled: bool = False
@@ -123,6 +132,8 @@ class GuildPlayer:
     _ai_generation_task: asyncio.Task | None = None  # Current AI generation task
     ai_fallback_pool: collections.deque = field(default_factory=collections.deque)  # FIFO fallback tracks
     ai_fallback_ids: set[str] = field(default_factory=set)  # Track fallback video_ids to avoid duplicates
+    ai_language_policy: str = ENGLISH_DEFAULT
+    ai_language_hint: str | None = None
     # Recent playback history (most-recent first). Stores QueueItem copies of previously played tracks.
     recent_history: collections.deque = field(default_factory=lambda: collections.deque(maxlen=10))
 
@@ -162,6 +173,33 @@ class MusicCog(commands.Cog):
         denom = max(1, int(self.RADIO_PRESENTER_RANDOM_ANNOUNCE_DENOMINATOR))
         roll = random.randrange(denom)
         return (roll == 0), f"random_1_in_{denom}", roll
+
+    @staticmethod
+    def _ai_child_language_context(player: GuildPlayer) -> tuple[str, str | None]:
+        if player.ai_language_policy == EXPLICIT_LANGUAGE_SESSION:
+            return player.ai_language_policy, player.ai_language_hint
+        return ENGLISH_DEFAULT, None
+
+    @staticmethod
+    def _apply_ai_language_policy(ai_result, policy: str | None, language_hint: str | None):
+        if policy != NON_ENGLISH_ONE_SHOT or not ai_result:
+            return ai_result
+
+        alternatives = list(getattr(ai_result, "alternatives", []) or [])
+        englishish_alternatives = [
+            alt for alt in alternatives if not is_likely_non_english_suggestion(alt, language_hint)
+        ]
+        non_english_alternatives = [
+            alt for alt in alternatives if is_likely_non_english_suggestion(alt, language_hint)
+        ]
+
+        autoplay = getattr(ai_result, "autoplay_next", None)
+        if autoplay and is_likely_non_english_suggestion(autoplay, language_hint) and englishish_alternatives:
+            ai_result.autoplay_next = englishish_alternatives.pop(0)
+
+        # Keep at most one visibly non-English alternative for a one-shot seed.
+        ai_result.alternatives = englishish_alternatives + non_english_alternatives[:1]
+        return ai_result
     
     @staticmethod
     def _build_ffmpeg_options(stream_info: StreamInfo, bitrate: int = 128) -> dict:
@@ -182,8 +220,23 @@ class MusicCog(commands.Cog):
     
     async def _get_next_item(self, player: GuildPlayer) -> QueueItem | None:
         """Get next item from queue or discovery (prioritizes AI autoplay if enabled)."""
-        if not player.queue.empty():
-            return player.queue.get_nowait()
+        while not player.queue.empty():
+            item = player.queue.get_nowait()
+            if (
+                item.discovery_source != "user_request"
+                and self._is_reserved_song(player, item, include_ai_fallback=False)
+            ):
+                log.info_cat(
+                    Category.DISCOVERY,
+                    "Skipping duplicate queued discovery track",
+                    guild_id=player.guild_id,
+                    title=item.title,
+                    artist=item.artist,
+                    video_id=item.video_id,
+                    source=item.discovery_source,
+                )
+                continue
+            return item
             
         if not player.autoplay:
             return None
@@ -193,17 +246,47 @@ class MusicCog(commands.Cog):
             if player.ai_autoplay_next:
                 item = player.ai_autoplay_next
                 player.ai_autoplay_next = None  # Clear after use
-                log.info_cat(
-                    Category.DISCOVERY,
-                    "Using AI autoplay next track",
-                    guild_id=player.guild_id,
-                    title=item.title
-                )
-                return item
-            if player.ai_fallback_pool:
+                if self._is_reserved_song(
+                    player,
+                    item,
+                    include_ai_autoplay=False,
+                    include_ai_fallback=False,
+                ):
+                    log.info_cat(
+                        Category.DISCOVERY,
+                        "Skipping duplicate AI autoplay next track",
+                        guild_id=player.guild_id,
+                        title=item.title,
+                        artist=item.artist,
+                        video_id=item.video_id,
+                    )
+                else:
+                    log.info_cat(
+                        Category.DISCOVERY,
+                        "Using AI autoplay next track",
+                        guild_id=player.guild_id,
+                        title=item.title
+                    )
+                    return item
+            while player.ai_fallback_pool:
                 item = player.ai_fallback_pool.popleft()
                 if getattr(item, "video_id", None) in player.ai_fallback_ids:
                     player.ai_fallback_ids.discard(item.video_id)
+                if self._is_reserved_song(
+                    player,
+                    item,
+                    include_ai_autoplay=False,
+                    include_ai_fallback=False,
+                ):
+                    log.info_cat(
+                        Category.DISCOVERY,
+                        "Skipping duplicate AI fallback track",
+                        guild_id=player.guild_id,
+                        title=item.title,
+                        artist=item.artist,
+                        video_id=item.video_id,
+                    )
+                    continue
                 log.info_cat(
                     Category.DISCOVERY,
                     "Using AI fallback track",
@@ -370,6 +453,75 @@ class MusicCog(commands.Cog):
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
+
+    @staticmethod
+    def _song_key(title: str | None, artist: str | None) -> str | None:
+        title_key = " ".join((title or "").strip().lower().split())
+        artist_key = " ".join((artist or "").strip().lower().split())
+        if not title_key and not artist_key:
+            return None
+        return f"{artist_key}|{title_key}"
+
+    @classmethod
+    def _item_song_key(cls, item: QueueItem | None) -> str | None:
+        if not item:
+            return None
+        return cls._song_key(getattr(item, "title", None), getattr(item, "artist", None))
+
+    def _reserved_song_identity(
+        self,
+        player: GuildPlayer,
+        *,
+        include_ai_autoplay: bool = True,
+        include_ai_fallback: bool = True,
+    ) -> tuple[set[str], set[str]]:
+        """Tracks that should not be rediscovered into the autoplay queue."""
+        ids: set[str] = set()
+        keys: set[str] = set()
+
+        def remember(item: QueueItem | None) -> None:
+            if not item:
+                return
+            video_id = getattr(item, "video_id", None)
+            if video_id:
+                ids.add(video_id)
+            key = self._item_song_key(item)
+            if key:
+                keys.add(key)
+
+        remember(player.current)
+        remember(player._next_discovery)
+        if include_ai_autoplay:
+            remember(player.ai_autoplay_next)
+        for item in list(player.queue._queue):
+            remember(item)
+        for item in list(getattr(player, "recent_history", []) or []):
+            remember(item)
+        if include_ai_fallback:
+            for item in list(getattr(player, "ai_fallback_pool", []) or []):
+                remember(item)
+
+        return ids, keys
+
+    def _is_reserved_song(
+        self,
+        player: GuildPlayer,
+        item: QueueItem | None,
+        *,
+        include_ai_autoplay: bool = True,
+        include_ai_fallback: bool = True,
+    ) -> bool:
+        if not item:
+            return False
+        ids, keys = self._reserved_song_identity(
+            player,
+            include_ai_autoplay=include_ai_autoplay,
+            include_ai_fallback=include_ai_fallback,
+        )
+        if item.video_id and item.video_id in ids:
+            return True
+        key = self._item_song_key(item)
+        return bool(key and key in keys)
 
     async def _guild_bool_setting(self, guild_id: int, key: str, default: bool = True) -> bool:
         if not hasattr(self.bot, "db") or not self.bot.db:
@@ -1049,6 +1201,8 @@ class MusicCog(commands.Cog):
                                     duration_seconds=item.duration_seconds,
                                     genre=item.genre,
                                     year=item.year,
+                                    language_policy=item.language_policy,
+                                    language_hint=item.language_hint,
                                 )
                                 # Keep most-recent first ordering
                                 if hasattr(player, "recent_history"):
@@ -1089,28 +1243,42 @@ class MusicCog(commands.Cog):
             )
             return
 
-        # Get max duration setting
-        max_seconds = 0
-        if hasattr(self.bot, "db") and self.bot.db:
-            try:
-                guild_crud = GuildCRUD(self.bot.db)
-                max_dur = await guild_crud.get_setting(player.guild_id, "max_song_duration")
-                if max_dur:
-                    max_seconds = int(max_dur) * 60
-            except: pass
+        async with player._queue_fill_lock:
+            # Get max duration setting
+            max_seconds = 0
+            if hasattr(self.bot, "db") and self.bot.db:
+                try:
+                    guild_crud = GuildCRUD(self.bot.db)
+                    max_dur = await guild_crud.get_setting(player.guild_id, "max_song_duration")
+                    if max_dur:
+                        max_seconds = int(max_dur) * 60
+                except: pass
 
-        TARGET_SIZE = 4
-        while player.queue.qsize() < TARGET_SIZE:
-            log.debug_cat(Category.DISCOVERY, "Queue low, fetching discovery song", 
-                         current_size=player.queue.qsize(), target=TARGET_SIZE)
-            item = await self._get_discovery_song_with_retry(player, max_seconds=max_seconds)
-            if item:
-                await player.queue.put(item)
-                # Prefetch stream URL for the first item in queue if it doesn't have one
-                if player.queue.qsize() == 1:
-                    asyncio.create_task(self._pre_buffer_next(player))
-            else:
-                break
+            TARGET_SIZE = 4
+            attempts = 0
+            max_attempts = max(6, (TARGET_SIZE - player.queue.qsize()) * 4)
+            while player.queue.qsize() < TARGET_SIZE and attempts < max_attempts:
+                attempts += 1
+                log.debug_cat(Category.DISCOVERY, "Queue low, fetching discovery song",
+                             current_size=player.queue.qsize(), target=TARGET_SIZE)
+                item = await self._get_discovery_song_with_retry(player, max_seconds=max_seconds)
+                if item:
+                    await player.queue.put(item)
+                    # Prefetch stream URL for the first item in queue if it doesn't have one
+                    if player.queue.qsize() == 1:
+                        asyncio.create_task(self._pre_buffer_next(player))
+                else:
+                    break
+
+            if player.queue.qsize() < TARGET_SIZE and attempts >= max_attempts:
+                log.warning_cat(
+                    Category.DISCOVERY,
+                    "Queue fill stopped after duplicate/invalid discovery attempts",
+                    guild_id=player.guild_id,
+                    current_size=player.queue.qsize(),
+                    target=TARGET_SIZE,
+                    attempts=attempts,
+                )
 
     async def _maintain_queue(self, player: GuildPlayer):
         """Background task to keep the queue filled while the player is active."""
@@ -1398,7 +1566,7 @@ class MusicCog(commands.Cog):
     
     async def _get_discovery_song_with_retry(self, player: GuildPlayer, max_seconds: int = 0) -> QueueItem | None:
         """Get discovery song with retry logic for duration limits."""
-        for attempt in range(3):
+        for attempt in range(5):
             item = await self._get_discovery_song(player)
             if not item:
                 return None
@@ -1407,6 +1575,17 @@ class MusicCog(commands.Cog):
                 log.event(Category.DISCOVERY, "song_skipped_duration", 
                          title=item.title, duration=item.duration_seconds, 
                          max_duration=max_seconds, attempt=attempt + 1)
+                continue
+            if self._is_reserved_song(player, item):
+                log.info_cat(
+                    Category.DISCOVERY,
+                    "Skipping duplicate discovery song",
+                    guild_id=player.guild_id,
+                    title=item.title,
+                    artist=item.artist,
+                    video_id=item.video_id,
+                    attempt=attempt + 1,
+                )
                 continue
             return item
         return None
@@ -1524,8 +1703,9 @@ class MusicCog(commands.Cog):
             return
         
         try:
-            # Build exclude list (recent + dislikes)
-            exclude_list = []
+            # Build exclude list (current track + recent + dislikes). /play ai starts
+            # generation before the seed is always visible in DB history.
+            exclude_list = [{"title": track.title, "artist": track.artist}]
             if hasattr(self.bot, "db") and self.bot.db:
                 try:
                     from src.database.crud import PlaybackCRUD, ReactionCRUD
@@ -1553,6 +1733,8 @@ class MusicCog(commands.Cog):
                 "artist": track.artist,
                 "genre": getattr(track, "genre", None),
                 "year": getattr(track, "year", None),
+                "language_policy": getattr(track, "language_policy", None) or player.ai_language_policy,
+                "language_hint": getattr(track, "language_hint", None) or player.ai_language_hint,
             }
             
             # Call AI with timeout
@@ -1568,12 +1750,47 @@ class MusicCog(commands.Cog):
             if not ai_result:
                 log.warning_cat(Category.API, "AI returned no results", guild_id=player.guild_id)
                 return
+
+            ai_result = self._apply_ai_language_policy(
+                ai_result,
+                seed_metadata.get("language_policy"),
+                seed_metadata.get("language_hint"),
+            )
             
             # Check if this result is stale (track ID changed)
             if player.ai_seed_track_id != track.video_id:
                 log.debug_cat(Category.API, "AI result stale, discarding", 
                             expected=track.video_id, got=player.ai_seed_track_id)
                 return
+
+            reserved_ids, reserved_keys = self._reserved_song_identity(player)
+            if track.video_id:
+                reserved_ids.add(track.video_id)
+            track_key = self._item_song_key(track)
+            if track_key:
+                reserved_keys.add(track_key)
+
+            new_ids: set[str] = set()
+            new_keys: set[str] = set()
+            child_language_policy, child_language_hint = self._ai_child_language_context(player)
+
+            def _is_duplicate_ai_item(item: QueueItem | None) -> bool:
+                if not item:
+                    return True
+                key = self._item_song_key(item)
+                return bool(
+                    (item.video_id and (item.video_id in reserved_ids or item.video_id in new_ids))
+                    or (key and (key in reserved_keys or key in new_keys))
+                )
+
+            def _remember_ai_item(item: QueueItem | None) -> None:
+                if not item:
+                    return
+                if item.video_id:
+                    new_ids.add(item.video_id)
+                key = self._item_song_key(item)
+                if key:
+                    new_keys.add(key)
             
             # Resolve autoplay_next
             autoplay_item = None
@@ -1597,7 +1814,21 @@ class MusicCog(commands.Cog):
                         discovery_reason=ai_result.autoplay_next.reason,
                         duration_seconds=duration_seconds,
                         year=getattr(resolved_track, "year", None),
+                        language_policy=child_language_policy,
+                        language_hint=child_language_hint,
                     )
+                    if _is_duplicate_ai_item(autoplay_item):
+                        log.info_cat(
+                            Category.DISCOVERY,
+                            "Skipping duplicate AI autoplay suggestion",
+                            guild_id=player.guild_id,
+                            title=autoplay_item.title,
+                            artist=autoplay_item.artist,
+                            video_id=autoplay_item.video_id,
+                        )
+                        autoplay_item = None
+                    else:
+                        _remember_ai_item(autoplay_item)
             except Exception as e:
                 log.warning_cat(Category.SYSTEM, "Failed to resolve AI autoplay", error=str(e))
             
@@ -1624,7 +1855,20 @@ class MusicCog(commands.Cog):
                             discovery_reason=suggestion.reason,
                             duration_seconds=duration_seconds,
                             year=getattr(resolved_track, "year", None),
+                            language_policy=child_language_policy,
+                            language_hint=child_language_hint,
                         )
+                        if _is_duplicate_ai_item(alt_item):
+                            log.info_cat(
+                                Category.DISCOVERY,
+                                "Skipping duplicate AI alternative suggestion",
+                                guild_id=player.guild_id,
+                                title=alt_item.title,
+                                artist=alt_item.artist,
+                                video_id=alt_item.video_id,
+                            )
+                            continue
+                        _remember_ai_item(alt_item)
                         alternatives.append(alt_item)
                 except Exception as e:
                     log.debug_cat(Category.SYSTEM, "Failed to resolve AI alternative", error=str(e))
@@ -1638,17 +1882,29 @@ class MusicCog(commands.Cog):
                 player.ai_generated_at = datetime.now(UTC)
 
             # Keep a rolling fallback pool (max 100 unique tracks).
+            fallback_keys = {
+                key for key in (self._item_song_key(item) for item in player.ai_fallback_pool) if key
+            }
+
             def _add_fallback(item: QueueItem | None) -> None:
                 if not item or not item.video_id:
                     return
                 if item.video_id in player.ai_fallback_ids:
                     return
+                item_key = self._item_song_key(item)
+                if item_key and item_key in fallback_keys:
+                    return
                 while len(player.ai_fallback_pool) >= 100:
                     old = player.ai_fallback_pool.popleft()
                     if getattr(old, "video_id", None) in player.ai_fallback_ids:
                         player.ai_fallback_ids.discard(old.video_id)
+                    old_key = self._item_song_key(old)
+                    if old_key:
+                        fallback_keys.discard(old_key)
                 player.ai_fallback_pool.append(item)
                 player.ai_fallback_ids.add(item.video_id)
+                if item_key:
+                    fallback_keys.add(item_key)
 
             _add_fallback(autoplay_item)
             for alt in alternatives:

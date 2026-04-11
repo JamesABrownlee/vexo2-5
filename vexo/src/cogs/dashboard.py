@@ -868,7 +868,11 @@ class DashboardCog(commands.Cog):
     async def _handle_index(self, request: web.Request) -> web.Response:
         html_file = TEMPLATE_DIR / "index.html"
         if html_file.exists():
-            return web.Response(text=html_file.read_text(encoding='utf-8'), content_type="text/html")
+            return web.Response(
+                text=html_file.read_text(encoding='utf-8'),
+                content_type="text/html",
+                headers={"Cache-Control": "no-store"},
+            )
         return web.Response(text="Dashboard template not found", status=404)
     
     async def _handle_status(self, request: web.Request) -> web.Response:
@@ -1256,6 +1260,27 @@ class DashboardCog(commands.Cog):
             data = await request.json()
             for key, value in data.items():
                 await crud.set_global_setting(key, value)
+
+            # If Local AI settings were updated, refresh the bot's active AI client immediately.
+            try:
+                from src.config import config
+                changed_ai = False
+                if "LOCAL_AI_ENABLED" in data:
+                    config.LOCAL_AI_ENABLED = bool(data.get("LOCAL_AI_ENABLED"))
+                    changed_ai = True
+                if "LOCAL_AI_PROVIDER" in data:
+                    config.LOCAL_AI_PROVIDER = data.get("LOCAL_AI_PROVIDER")
+                    changed_ai = True
+
+                if changed_ai and hasattr(self.bot, "_ai_factory") and self.bot._ai_factory:
+                    self.bot.ai_client = await self.bot._ai_factory.get_for_config()
+                    try:
+                        self.bot.ai_provider_status = await self.bot._ai_factory.status()
+                    except Exception:
+                        self.bot.ai_provider_status = None
+            except Exception:
+                pass
+
             return web.json_response({"status": "ok"})
         else:
             limit = await crud.get_global_setting("max_concurrent_servers")
@@ -1292,12 +1317,20 @@ class DashboardCog(commands.Cog):
             selected = status.get("selected_provider")
             message = status.get("message")
 
+            if (
+                ai_enabled
+                and preferred in providers
+                and bool(providers.get(preferred, {}).get("available", False))
+            ):
+                selected = preferred
+                message = None
+
             # Compose fallback/selection message when not provided
             if not message:
                 if not ai_enabled:
                     message = "Local AI is disabled."
                 elif not ai_available:
-                    message = "AI is not available. Neither Ollama nor llama.cpp responded."
+                    message = "AI is not available. No configured providers responded."
                 else:
                     # Both or one available
                     if preferred and selected and preferred != selected:
@@ -1315,11 +1348,14 @@ class DashboardCog(commands.Cog):
                 "providers": {
                     "ollama": {"available": bool(providers.get("ollama", {}).get("available", False)), "label": providers.get("ollama", {}).get("label", "Ollama")},
                     "llamacpp": {"available": bool(providers.get("llamacpp", {}).get("available", False)), "label": providers.get("llamacpp", {}).get("label", "llama.cpp")},
+                    "gemma": {"available": bool(providers.get("gemma", {}).get("available", False)), "label": providers.get("gemma", {}).get("label", "Gemma")},
+                    "openai": {"available": bool(providers.get("openai", {}).get("available", False)), "label": providers.get("openai", {}).get("label", "OpenAI")},
+                    "openai_codex": {"available": bool(providers.get("openai_codex", {}).get("available", False)), "label": providers.get("openai_codex", {}).get("label", "OpenAI Codex (proxy)")},
                 },
                 "message": message,
             }
 
-            return web.json_response(out)
+            return web.json_response(out, headers={"Cache-Control": "no-store"})
         except Exception as e:
             return web.json_response({"error": "failed", "message": str(e)}, status=500)
 

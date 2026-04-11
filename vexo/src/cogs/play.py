@@ -12,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from src.database.crud import SongCRUD, UserCRUD, GuildCRUD, LibraryCRUD
+from src.services.ai.language_policy import ENGLISH_DEFAULT, infer_language_policy
 from src.utils.logging import get_logger, Category, Event
 
 from src.cogs.music import QueueItem
@@ -612,6 +613,11 @@ class PlayCog(commands.Cog):
                 return None
 
             duration_seconds = _coerce_duration_seconds(getattr(seed_track, "duration_seconds", None))
+            language_context = infer_language_policy(
+                query=seed_query,
+                title=getattr(seed_track, "title", None),
+                artist=getattr(seed_track, "artist", None),
+            )
 
             # Queue seed track
             song_db_id = None
@@ -646,6 +652,8 @@ class PlayCog(commands.Cog):
                 song_db_id=song_db_id,
                 duration_seconds=duration_seconds,
                 year=seed_track.year,
+                language_policy=language_context.get("policy"),
+                language_hint=language_context.get("language_hint"),
             )
             player.queue.put_nowait(seed_item)
             player.last_activity = datetime.now(UTC)
@@ -660,6 +668,15 @@ class PlayCog(commands.Cog):
             player.ai_generated_at = None
             player.ai_fallback_pool.clear()
             player.ai_fallback_ids.clear()
+            player.ai_language_policy = language_context.get("policy") or ENGLISH_DEFAULT
+            player.ai_language_hint = language_context.get("language_hint")
+            log.info_cat(
+                Category.SYSTEM,
+                "AI language policy selected",
+                guild_id=interaction.guild_id,
+                policy=player.ai_language_policy,
+                language_hint=player.ai_language_hint,
+            )
             
             # Cancel any pending AI generation
             if player._ai_generation_task and not player._ai_generation_task.done():

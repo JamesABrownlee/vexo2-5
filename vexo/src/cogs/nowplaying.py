@@ -685,6 +685,19 @@ class NowPlayingView(discord.ui.View):
                 return
             
             selected_track = ai_alternatives[selected_index]
+
+            music = self.bot.get_cog("MusicCog")
+            if (
+                music
+                and hasattr(music, "_is_reserved_song")
+                and music._is_reserved_song(player, selected_track, include_ai_fallback=False)
+            ):
+                await self._safe_send(
+                    interaction,
+                    "That AI choice was already queued or recently played. Pick another one.",
+                    ephemeral=True,
+                )
+                return
             
             # Insert at front of queue (play next) without interrupting current playback.
             temp_queue = []
@@ -774,6 +787,8 @@ class NowPlayingView(discord.ui.View):
                     duration_seconds=src.duration_seconds,
                     genre=src.genre,
                     year=src.year,
+                    language_policy=getattr(src, "language_policy", None),
+                    language_hint=getattr(src, "language_hint", None),
                 )
                 # Enqueue at tail
                 player.queue.put_nowait(clone)
@@ -806,6 +821,8 @@ class NowPlayingView(discord.ui.View):
                     duration_seconds=src.duration_seconds,
                     genre=src.genre,
                     year=src.year,
+                    language_policy=getattr(src, "language_policy", None),
+                    language_hint=getattr(src, "language_hint", None),
                 )
                 # Insert at front so it becomes next
                 player.queue.put_at_front(clone)
