@@ -468,6 +468,52 @@ class MusicCog(commands.Cog):
             return None
         return cls._song_key(getattr(item, "title", None), getattr(item, "artist", None))
 
+    @classmethod
+    def _track_dict_song_key(cls, track: dict | None) -> str | None:
+        if not track:
+            return None
+        return cls._song_key(
+            track.get("title"),
+            track.get("artist") or track.get("artist_name"),
+        )
+
+    @staticmethod
+    def _track_dict_artist(track: dict | None) -> str:
+        if not track:
+            return ""
+        return str(track.get("artist") or track.get("artist_name") or "")
+
+    @classmethod
+    def _remember_track_identity(
+        cls,
+        ids: set[str],
+        keys: set[str],
+        track: dict | None,
+        *id_fields: str,
+    ) -> bool:
+        if not track:
+            return False
+
+        remembered = False
+        for field in id_fields:
+            value = track.get(field)
+            if value:
+                value = str(value)
+                if value in ids:
+                    remembered = True
+                else:
+                    ids.add(value)
+                break
+
+        key = cls._track_dict_song_key(track)
+        if key:
+            if key in keys:
+                remembered = True
+            else:
+                keys.add(key)
+
+        return remembered
+
     def _reserved_song_identity(
         self,
         player: GuildPlayer,
@@ -1414,23 +1460,20 @@ class MusicCog(commands.Cog):
                 all_dislikes.extend(dislikes_list)
             
             # Get recently played tracks
-            recent = await playback_crud.get_recent_history(player.guild_id, limit=100)
+            recent = await playback_crud.get_recent_history(player.guild_id, limit=50)
             
             # Build exclude list
             exclude_list = []
             seen_ids = set()
+            seen_keys = set()
             
             for track in all_dislikes:
-                track_id = track.get("id") or track.get("canonical_yt_id")
-                if track_id and track_id not in seen_ids:
-                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
-                    seen_ids.add(track_id)
+                if not self._remember_track_identity(seen_ids, seen_keys, track, "id", "canonical_yt_id"):
+                    exclude_list.append({"title": track.get("title", ""), "artist": self._track_dict_artist(track)})
             
             for track in recent:
-                track_id = track.get("song_id") or track.get("canonical_yt_id")
-                if track_id and track_id not in seen_ids:
-                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
-                    seen_ids.add(track_id)
+                if not self._remember_track_identity(seen_ids, seen_keys, track, "song_id", "canonical_yt_id"):
+                    exclude_list.append({"title": track.get("title", ""), "artist": self._track_dict_artist(track)})
             
             # Use current or last track as seed if available
             seed_track = None
@@ -1490,6 +1533,9 @@ class MusicCog(commands.Cog):
             
             # Try to resolve suggestions
             for suggestion in suggestions:
+                suggestion_key = self._song_key(suggestion.title, suggestion.artist)
+                if suggestion_key and suggestion_key in seen_keys:
+                    continue
                 search_query = f"{suggestion.title} {suggestion.artist}"
                 try:
                     if hasattr(self, "enrichment"):
@@ -1501,9 +1547,10 @@ class MusicCog(commands.Cog):
                         continue
                     
                     track = results[0]
+                    resolved_key = self._song_key(track.title, track.artist)
                     
                     # Check if already excluded
-                    if track.video_id in seen_ids:
+                    if track.video_id in seen_ids or (resolved_key and resolved_key in seen_keys):
                         continue
                     
                     # Check duration
@@ -1540,6 +1587,10 @@ class MusicCog(commands.Cog):
                         artist=track.artist,
                         for_user_id=target_user_id
                     )
+                    if track.video_id:
+                        seen_ids.add(track.video_id)
+                    if resolved_key:
+                        seen_keys.add(resolved_key)
 
                     return QueueItem(
                         video_id=track.video_id,
@@ -1732,9 +1783,9 @@ class MusicCog(commands.Cog):
                     reaction_crud = ReactionCRUD(self.bot.db)
                     
                     # Get recent playback
-                    recent = await playback_crud.get_recent_history(player.guild_id, limit=100)
+                    recent = await playback_crud.get_recent_history(player.guild_id, limit=50)
                     for r in recent:
-                        exclude_list.append({"title": r.get("title", ""), "artist": r.get("artist", "")})
+                        exclude_list.append({"title": r.get("title", ""), "artist": self._track_dict_artist(r)})
                     
                     # Get dislikes from VC members
                     if player.voice_client and player.voice_client.channel:
@@ -1788,6 +1839,10 @@ class MusicCog(commands.Cog):
             track_key = self._item_song_key(track)
             if track_key:
                 reserved_keys.add(track_key)
+            for excluded in exclude_list:
+                excluded_key = self._track_dict_song_key(excluded)
+                if excluded_key:
+                    reserved_keys.add(excluded_key)
 
             new_ids: set[str] = set()
             new_keys: set[str] = set()
@@ -2296,32 +2351,27 @@ class MusicCog(commands.Cog):
                 group_disliked.extend(dislikes_list)
             
             # Get recent playback to exclude
-            recent_playback = await playback_crud.get_recent_history(member.guild.id, limit=100)
+            recent_playback = await playback_crud.get_recent_history(member.guild.id, limit=50)
             
             # Build exclude list
             exclude_list = []
             seen_ids = set()
+            seen_keys = set()
             
             # Add user dislikes
             for track in user_disliked:
-                track_id = track.get("id") or track.get("canonical_yt_id")
-                if track_id and track_id not in seen_ids:
-                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
-                    seen_ids.add(track_id)
+                if not self._remember_track_identity(seen_ids, seen_keys, track, "id", "canonical_yt_id"):
+                    exclude_list.append({"title": track.get("title", ""), "artist": self._track_dict_artist(track)})
             
             # Add group dislikes
             for track in group_disliked:
-                track_id = track.get("id") or track.get("canonical_yt_id")
-                if track_id and track_id not in seen_ids:
-                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
-                    seen_ids.add(track_id)
+                if not self._remember_track_identity(seen_ids, seen_keys, track, "id", "canonical_yt_id"):
+                    exclude_list.append({"title": track.get("title", ""), "artist": self._track_dict_artist(track)})
             
             # Add recent playback
             for track in recent_playback:
-                track_id = track.get("song_id") or track.get("canonical_yt_id")
-                if track_id and track_id not in seen_ids:
-                    exclude_list.append({"title": track.get("title", ""), "artist": track.get("artist", "")})
-                    seen_ids.add(track_id)
+                if not self._remember_track_identity(seen_ids, seen_keys, track, "song_id", "canonical_yt_id"):
+                    exclude_list.append({"title": track.get("title", ""), "artist": self._track_dict_artist(track)})
             
             # Convert likes to simple dict format
             liked_simple = [{"title": t.get("title", ""), "artist": t.get("artist", "")} for t in liked_tracks]
@@ -2359,6 +2409,9 @@ class MusicCog(commands.Cog):
             for suggestion in suggestions:
                 if queued_count >= 5:
                     break
+                suggestion_key = self._song_key(suggestion.title, suggestion.artist)
+                if suggestion_key and suggestion_key in seen_keys:
+                    continue
                 
                 search_query = f"{suggestion.title} {suggestion.artist}"
                 try:
@@ -2372,9 +2425,10 @@ class MusicCog(commands.Cog):
                         continue
                     
                     track = results[0]
+                    resolved_key = self._song_key(track.title, track.artist)
                     
                     # Check if already in exclude list
-                    if track.video_id in seen_ids:
+                    if track.video_id in seen_ids or (resolved_key and resolved_key in seen_keys):
                         continue
                     
                     # Check duration
@@ -2406,6 +2460,10 @@ class MusicCog(commands.Cog):
                         log.error_cat(Category.DATABASE, "Failed to persist AI join suggestion", error=str(e))
                     
                     # Queue the track
+                    if track.video_id:
+                        seen_ids.add(track.video_id)
+                    if resolved_key:
+                        seen_keys.add(resolved_key)
                     item = QueueItem(
                         video_id=track.video_id,
                         title=track.title,
