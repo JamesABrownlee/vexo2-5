@@ -1,4 +1,4 @@
-"""OpenAI Codex (Responses API) client via internal proxy transport.
+"""OpenAI Codex client via internal proxy transport.
 
 This provider is designed for environments where direct outbound OpenAI calls
 are not desired, and all traffic must go through an internal proxy endpoint.
@@ -8,17 +8,14 @@ Expected proxy API (HTTP POST):
 - JSON body:
   {
     "label": "<string>",
-    "url": "https://chatgpt.com/backend-api/codex/responses",
-    "method": "POST",
-    "stream": false,
-    "json": { ... OpenAI Responses payload ... }
+    "prompt": "<full prompt text>"
   }
 
 Config via env:
-- CODEX_PROXY_URL   (required) e.g. https://your-host/internal/openai-proxy
+- CODEX_PROXY_URL   (required) e.g. https://your-host/api/musicbots/suggest
 - CODEX_PROXY_TOKEN (required)
+- CODEX_PROXY_LABEL (optional, default: hal)
 - CODEX_MODEL       (default: gpt-5.1-codex-mini)
-- CODEX_TARGET_URL  (default: https://chatgpt.com/backend-api/codex/responses)
 
 Note: This conforms to BaseAIClient and is selectable as LOCAL_AI_PROVIDER=openai_codex.
 """
@@ -72,9 +69,7 @@ class OpenAICodexClient(BaseAIClient):
     ):
         self.proxy_url = (proxy_url or "").rstrip("/")
         self.proxy_token = proxy_token or ""
-        # If no label is provided, omit it entirely and let the proxy pick the best available backend.
-        # Do not default to any static label.
-        self.proxy_label = (proxy_label or "").strip() or None
+        self.proxy_label = (proxy_label or "").strip() or "hal"
         self.model = model or "gpt-5.1-codex-mini"
         self.target_url = target_url
         self.health_cache_ttl = health_cache_ttl
@@ -130,9 +125,14 @@ class OpenAICodexClient(BaseAIClient):
 
     @staticmethod
     def _extract_text(data: dict) -> Optional[str]:
-        """Extract output text from an OpenAI Responses-style payload."""
+        """Extract output text from common proxy response shapes."""
         if not isinstance(data, dict):
             return None
+
+        for key in ("suggestion", "text", "response", "content", "message", "result", "output_text", "completion"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
 
         # Typical Responses shape:
         # {"output": [{"content": [{"type":"output_text","text":"..."}]}]}
@@ -153,9 +153,8 @@ class OpenAICodexClient(BaseAIClient):
             if chunks:
                 return "".join(chunks)
 
-        # Fallbacks sometimes used by proxies
-        if isinstance(data.get("text"), str):
-            return data.get("text")
+        if isinstance(data.get("output"), str):
+            return data.get("output")
 
         return None
 
@@ -198,41 +197,11 @@ class OpenAICodexClient(BaseAIClient):
         if not self.proxy_url or not self.proxy_token:
             return None
 
-        # NOTE: This proxy enforces stream=true.
         proxy_payload = {
-            "url": self.target_url,
-            "method": "POST",
-            "stream": True,
-            "json": {
-                "model": self.model,
-                "instructions": instructions,
-                "store": False,
-                "stream": True,
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": user_prompt}],
-                    }
-                ],
-                # NOTE: This Codex endpoint (via proxy) may reject some common OpenAI params
-                # like temperature/max_output_tokens. Keep the payload minimal and rely on
-                # strong prompting for deterministic JSON.
-            },
+            "label": self.proxy_label,
+            "model": self.model,
+            "prompt": f"{instructions.strip()}\n\n{user_prompt.strip()}",
         }
-        if self.proxy_label:
-            proxy_payload["label"] = self.proxy_label
-
-        def _mk_text_response(text: str) -> dict:
-            # Wrap extracted final text into a minimal Responses-like dict
-            return {
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": text}],
-                    }
-                ]
-            }
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -246,46 +215,11 @@ class OpenAICodexClient(BaseAIClient):
                         body = await resp.text()
                         log.warning_cat(Category.API, "Codex proxy call failed", status=resp.status, body=self._truncate(body))
                         return None
-
-                    # Parse SSE stream. We collect deltas from response.output_text.delta.
-                    buf = ""
-                    current_event = None
-                    data_lines: list[str] = []
-
-                    async for raw in resp.content:
-                        line = raw.decode("utf-8", errors="ignore")
-                        for part in line.splitlines():
-                            if part.startswith("event:"):
-                                current_event = part.split(":", 1)[1].strip()
-                            elif part.startswith("data:"):
-                                data_lines.append(part.split(":", 1)[1].strip())
-                            elif part.strip() == "":
-                                # Dispatch event
-                                if current_event and data_lines:
-                                    data_str = "\n".join(data_lines)
-                                    try:
-                                        payload = json.loads(data_str)
-                                        if current_event == "response.output_text.delta":
-                                            delta = payload.get("delta")
-                                            if isinstance(delta, str):
-                                                buf += delta
-                                        elif current_event == "response.output_text.done":
-                                            text = payload.get("text")
-                                            if isinstance(text, str) and text:
-                                                return _mk_text_response(text)
-                                        elif current_event == "response.completed":
-                                            # If we didn't catch output_text.done for some reason, fall back to collected deltas
-                                            if buf:
-                                                return _mk_text_response(buf)
-                                    except Exception:
-                                        pass
-                                current_event = None
-                                data_lines = []
-
-                    # Stream ended; return whatever we collected
-                    if buf:
-                        return _mk_text_response(buf)
-                    return None
+                    body = await resp.text()
+                    try:
+                        return json.loads(body)
+                    except Exception:
+                        return {"text": body}
         except Exception as e:
             log.warning_cat(Category.API, "Codex proxy call error", error=str(e))
             return None
@@ -313,10 +247,13 @@ class OpenAICodexClient(BaseAIClient):
         if not data:
             return []
 
-        content = self._extract_text(data) or ""
-        parsed = self._clean_to_json(content)
+        if isinstance(data, dict) and isinstance(data.get("suggestions"), list):
+            parsed = data
+        else:
+            content = self._extract_text(data) or ""
+            parsed = self._clean_to_json(content)
         if parsed is None:
-            log.warning_cat(Category.API, "Codex suggestion parse failed", text=self._truncate(content))
+            log.warning_cat(Category.API, "Codex suggestion parse failed", text=self._truncate(self._extract_text(data) or ""))
             return []
 
         return self._normalize_suggestions(parsed, n_candidates)
@@ -352,10 +289,13 @@ class OpenAICodexClient(BaseAIClient):
         if not data:
             return []
 
-        content = self._extract_text(data) or ""
-        parsed = self._clean_to_json(content)
+        if isinstance(data, dict) and isinstance(data.get("suggestions"), list):
+            parsed = data
+        else:
+            content = self._extract_text(data) or ""
+            parsed = self._clean_to_json(content)
         if parsed is None:
-            log.warning_cat(Category.API, "Codex suggestion parse failed", text=self._truncate(content))
+            log.warning_cat(Category.API, "Codex suggestion parse failed", text=self._truncate(self._extract_text(data) or ""))
             return []
 
         return self._normalize_suggestions(parsed, n_candidates)
@@ -389,10 +329,15 @@ class OpenAICodexClient(BaseAIClient):
         if not data:
             return None
 
-        content = self._extract_text(data) or ""
-        parsed = self._clean_to_json(content)
+        if isinstance(data, dict) and (
+            isinstance(data.get("autoplay_next"), dict) or isinstance(data.get("alternatives"), list)
+        ):
+            parsed = data
+        else:
+            content = self._extract_text(data) or ""
+            parsed = self._clean_to_json(content)
         if not isinstance(parsed, dict):
-            log.warning_cat(Category.API, "Codex playmode parse failed", text=self._truncate(content))
+            log.warning_cat(Category.API, "Codex playmode parse failed", text=self._truncate(self._extract_text(data) or ""))
             return None
 
         ap = parsed.get("autoplay_next")
